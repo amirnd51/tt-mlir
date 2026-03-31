@@ -1898,9 +1898,18 @@ createEltwiseBinaryOp(FlatbufferObjectCache &cache, EltwiseBinaryOp op) {
   auto outputDtype = toFlatbuffer(cache, op.getDtypeAttr());
 
   auto memoryConfig = toFlatbuffer(cache, op.getMemoryConfigAttr());
+  auto activations = mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+      cache, op.getActivations());
+  auto inputTensorAActivations =
+      mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+          cache, op.getInputTensorAActivations());
+  auto inputTensorBActivations =
+      mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+          cache, op.getInputTensorBActivations());
 
   return ::tt::target::ttnn::CreateEltwiseBinaryOp(
-      *cache.fbb, type, lhs, rhs, outputDtype, memoryConfig, out);
+      *cache.fbb, type, lhs, rhs, outputDtype, memoryConfig, activations,
+      inputTensorAActivations, inputTensorBActivations, out);
 }
 
 template <typename EltwiseBinaryCompositeOp>
@@ -1944,9 +1953,18 @@ createEltwiseBinaryCompositeOp(FlatbufferObjectCache &cache,
   auto out = cache.getOrCreateNoSharding(result, tensorValueToFlatbuffer,
 
                                          /*local_shape*/ std::nullopt);
+  auto activations = mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+      cache, op.getActivations());
+  auto inputTensorAActivations =
+      mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+          cache, op.getInputTensorAActivations());
+  auto inputTensorBActivations =
+      mlir::tt::toFlatbuffer<mlir::tt::ttnn::UnaryWithParamAttr>(
+          cache, op.getInputTensorBActivations());
 
   return ::tt::target::ttnn::CreateEltwiseBinaryCompositeOp(
-      *cache.fbb, type, lhs, rhs, memoryConfig, out);
+      *cache.fbb, type, lhs, rhs, memoryConfig, activations,
+      inputTensorAActivations, inputTensorBActivations, out);
 }
 
 template <typename EltwiseBinaryCompositeScalarOp>
@@ -2442,7 +2460,7 @@ createReductionOp(FlatbufferObjectCache &cache, ReductionOp op) {
 
                                   /*local_shape*/ std::nullopt);
   auto dimArg =
-      arrayAttrToFlatbuffer<mlir::IntegerAttr, int>(cache, op.getDimArg());
+      mlir::tt::toFlatbuffer<mlir::IntegerAttr, int>(cache, op.getDimArg());
 
   std::optional<
       ::flatbuffers::Offset<::tt::target::ttnn::DeviceComputeKernelConfig>>
@@ -2564,7 +2582,7 @@ createReshapeOp(FlatbufferObjectCache &cache, ReshapeOp op) {
   auto in = cache.at<::tt::target::ttnn::TensorRef>(
       getOperandThroughDPSOps(op.getInput()));
   auto shape =
-      arrayAttrToFlatbuffer<mlir::IntegerAttr, int32_t>(cache, op.getShape());
+      mlir::tt::toFlatbuffer<mlir::IntegerAttr, int32_t>(cache, op.getShape());
   auto out =
       cache.getOrCreateNoSharding(op.getResult(), tensorValueToFlatbuffer,
 
@@ -2669,10 +2687,10 @@ createSliceOp(FlatbufferObjectCache &cache, SliceOp op) {
     type = ::tt::target::ttnn::SliceOpType::SliceStaticOp;
     paramsType = ::tt::target::ttnn::SliceOpParams::SliceStaticOpParams;
     ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> begins =
-        arrayAttrToFlatbuffer<mlir::IntegerAttr, int64_t>(cache,
-                                                          op.getBegins());
+        mlir::tt::toFlatbuffer<mlir::IntegerAttr, int64_t>(cache,
+                                                           op.getBegins());
     ::flatbuffers::Offset<::flatbuffers::Vector<int64_t>> ends =
-        arrayAttrToFlatbuffer<mlir::IntegerAttr, int64_t>(cache, op.getEnds());
+        mlir::tt::toFlatbuffer<mlir::IntegerAttr, int64_t>(cache, op.getEnds());
     params =
         ::tt::target::ttnn::CreateSliceStaticOpParams(*cache.fbb, begins, ends)
             .Union();
@@ -2687,7 +2705,7 @@ createSliceOp(FlatbufferObjectCache &cache, SliceOp op) {
 
                                   /*local_shape*/ std::nullopt);
   auto step =
-      arrayAttrToFlatbuffer<mlir::IntegerAttr, int64_t>(cache, op.getStep());
+      mlir::tt::toFlatbuffer<mlir::IntegerAttr, int64_t>(cache, op.getStep());
 
   return ::tt::target::ttnn::CreateSliceOp(*cache.fbb, type, in, out, step,
                                            paramsType, params);
@@ -3708,7 +3726,7 @@ createOp(FlatbufferObjectCache &cache, DistributeTensorOp op) {
                                                meshShapeOverrideRef.end());
     auto arr = mlir::ArrayAttr::get(mapperAttr.getContext(), asAttrs);
     fbMeshShapeOverride =
-        arrayAttrToFlatbuffer<IntegerAttr, uint32_t>(cache, arr);
+        mlir::tt::toFlatbuffer<mlir::IntegerAttr, uint32_t>(cache, arr);
   }
 
   auto mapperConfig = ::tt::target::ttnn::CreateMeshMapperConfig(
@@ -3734,7 +3752,8 @@ createOp(FlatbufferObjectCache &cache, AggregateTensorOp op) {
                                                  dimsRef.end());
   auto dimsArr =
       mlir::ArrayAttr::get(composerConfigAttr.getContext(), dimsAsAttrs);
-  auto dimsFb = arrayAttrToFlatbuffer<IntegerAttr, int32_t>(cache, dimsArr);
+  auto dimsFb =
+      mlir::tt::toFlatbuffer<mlir::IntegerAttr, int32_t>(cache, dimsArr);
   ::flatbuffers::Offset<flatbuffers::Vector<uint32_t>> meshShapeOverrideFb = 0;
   auto meshShapeOverrideRef = composerConfigAttr.getMeshShapeOverride();
   if (!meshShapeOverrideRef.empty()) {
@@ -3743,7 +3762,7 @@ createOp(FlatbufferObjectCache &cache, AggregateTensorOp op) {
     auto msArr =
         mlir::ArrayAttr::get(composerConfigAttr.getContext(), msAsAttrs);
     meshShapeOverrideFb =
-        arrayAttrToFlatbuffer<IntegerAttr, uint32_t>(cache, msArr);
+        mlir::tt::toFlatbuffer<mlir::IntegerAttr, uint32_t>(cache, msArr);
   }
 
   // Create the MeshComposerConfig FlatBuffer object
