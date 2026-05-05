@@ -5,6 +5,7 @@
 #include "ttmlir/AffineMapUtils.h"
 #include "ttmlir/Asserts.h"
 #include "ttmlir/Conversion/TTKernelToEmitC/TTKernelToEmitC.h"
+#include "ttmlir/Dialect/D2M/IR/D2MOps.h"
 #include "ttmlir/Dialect/D2M/Utils/Utils.h"
 #include "ttmlir/Dialect/TTCore/IR/TTCoreOps.h"
 #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
@@ -749,8 +750,24 @@ memrefGlobalOpToFlatbufferByteVector(FlatbufferObjectCache &cache,
   flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data;
 
   if (mlir::isa<FloatType>(value.getElementType())) {
-    if (value.getElementType().getIntOrFloatBitWidth() == 32) {
+    unsigned const bw = value.getElementType().getIntOrFloatBitWidth();
+    if (bw == 32) {
       data = mlir::tt::toFlatbufferByteVector<float>(cache, initialValueAttr);
+    } else if (bw == 16) {
+      // bf16 (and f16): serialize as raw 16-bit bit patterns. The
+      // DenseElementsAttr exposes float values via APFloat with the
+      // appropriate semantics; we extract the raw bit pattern.
+      size_t const sizeBytes = initialValueAttr.getNumElements() *
+                                sizeof(uint16_t);
+      cache.fbb->StartVector<flatbuffers::Offset<uint8_t>>(sizeBytes);
+      for (auto it = initialValueAttr.value_begin<llvm::APFloat>();
+           it != initialValueAttr.value_end<llvm::APFloat>(); ++it) {
+        uint16_t bits = static_cast<uint16_t>(
+            (*it).bitcastToAPInt().getZExtValue());
+        uint8_t *buf = reinterpret_cast<uint8_t *>(&bits);
+        cache.fbb->PushBytes(buf, sizeof(uint16_t));
+      }
+      data = cache.fbb->EndVector(sizeBytes);
     } else {
       assert(false && "unsupported float bit width");
     }
@@ -1018,6 +1035,32 @@ std::shared_ptr<void> translateTTMetalToFlatbuffer(
       } else if (auto funcOp = dyn_cast_if_present<func::FuncOp>(op); funcOp) {
         // Unqualified walk will visit the root op itself last, we should
         // ignore this.
+        return;
+      } else if (auto streamOp =
+                     dyn_cast_if_present<d2m::StreamLayoutOp>(op);
+                 streamOp) {
+        // MOLA local patch (2026-05-05, patch 07): d2m.stream_layout is a
+        // view-with-storage wrapper produced by GridSelection's
+        // insertTTNNDRAMStreams when a d2m.generic operand is in
+        // (DeviceDRAM, Interleaved) state. In the standard non-MOLA flow
+        // these stream_layouts are typically dead by translate time
+        // (DCE'd by canonicalize because their results are unused), but
+        // when MOLA's mola-capacity-demote pass demotes additional
+        // operands to DRAM, the resulting bridges have live uses fed
+        // forward into ttmetal.enqueue_program. The kernel side knows
+        // how to fetch from the underlying DRAM buffer (the stream's
+        // input) via the buffer_address kernel arg, so the BufferRef in
+        // the flatbuffer should resolve to the input, not to the view.
+        // Alias the stream's result to its input's BufferRef in the
+        // object cache and skip emitting a command for the stream op
+        // itself.
+        Value input = streamOp.getInput();
+        const void *inputKey = input.getAsOpaquePointer();
+        const void *resultKey = streamOp.getResult().getAsOpaquePointer();
+        auto it = cache.objectMap.find(inputKey);
+        if (it != cache.objectMap.end()) {
+          cache.objectMap[resultKey] = it->second;
+        }
         return;
       } else {
         llvm_unreachable("Encountered unsupported op.");

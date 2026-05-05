@@ -264,6 +264,20 @@ protected:
       elementType = ttcore::TileType::get(elementType, tileShape);
     }
 
+    // MOLA local patch (2026-05-04, see
+    // /home/amirnass/projects/mola/docs/plans/priority-1-spike-2026-05-04.md):
+    // upstream's hardcoded `TensorMemoryLayout::Sharded` produces
+    // single-bank-sharded DRAM allocations that tt-metal's runtime
+    // can't dispatch (worker-coord vs DRAM-channel mismatch in
+    // get_dram_channel_from_logical_core). Interleaved is the
+    // production-tested DRAM layout. Branch on memory space so DRAM
+    // allocations land as interleaved while L1 stays sharded (the
+    // working production path for L1).
+    const ttcore::TensorMemoryLayout layoutKind =
+        (memSpace == ttcore::MemorySpace::DeviceDRAM)
+            ? ttcore::TensorMemoryLayout::Interleaved
+            : ttcore::TensorMemoryLayout::Sharded;
+
     ttcore::MetalLayoutAttr layout;
     if (!collapseTensors || noCollapse) {
       auto emptyIntervalType = RankedTensorType::get(
@@ -285,13 +299,13 @@ protected:
 
       layout = ttcore::MetalLayoutAttr::get(
           rewriter.getContext(), logicalShape, oobVal, memSpace,
-          ttcore::TensorMemoryLayout::Sharded, emptyCollapseIntervals,
+          layoutKind, emptyCollapseIntervals,
           coreVirtMap);
 
     } else {
       layout = ttcore::MetalLayoutAttr::get(
           rewriter.getContext(), logicalShape, oobVal, memSpace,
-          ttcore::TensorMemoryLayout::Sharded);
+          layoutKind);
     }
 
     // Get raw, unsharded physical shape.

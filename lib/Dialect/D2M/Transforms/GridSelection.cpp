@@ -1022,6 +1022,23 @@ static bool hasTTNNOperands(d2m::GenericOp genericOp) {
         view && view.getInput().getDefiningOp<ttir::TTNNMetalLayoutCastOp>()) {
       return true;
     }
+    // MOLA local patch (2026-05-04): also detect DRAM-interleaved
+    // operands that didn't come from a TTNNMetalLayoutCastOp (e.g.
+    // stablehlo → TTIR → D2M flow with DRAM defaults). The
+    // insertTTNNDRAMStreams logic correctly handles these too — see
+    // the cast-op-conditional branches inside that function.
+    auto tensorTy = mlir::dyn_cast<RankedTensorType>(operand.getType());
+    if (!tensorTy) {
+      continue;
+    }
+    auto layout = mlir::dyn_cast_or_null<ttcore::MetalLayoutAttr>(
+        tensorTy.getEncoding());
+    if (layout &&
+        layout.getMemorySpace() == ttcore::MemorySpace::DeviceDRAM &&
+        layout.getMemoryLayout() ==
+            ttcore::TensorMemoryLayout::Interleaved) {
+      return true;
+    }
   }
   return false;
 }
@@ -1161,16 +1178,22 @@ insertTTNNDRAMStreams(d2m::GenericOp genericOp,
     // already streamed, but the cast back to ttnn silently erases the index
     // map. Instead, we just forward the already streamed metal tensor to the
     // current generic.
+    //
+    // MOLA local patch (2026-05-04): castOp may be null when the
+    // operand was produced directly by D2M (e.g. stablehlo → TTIR →
+    // D2M flow with DRAM defaults, no TTNN-mode origin). In that case
+    // skip the cast-op-specific handling — we still want to insert a
+    // stream_layout to bridge the DRAM-interleaved tensor to a sharded
+    // L1 storage so d2m.generic can compute on the L1 view.
     auto castOp = operand.getDefiningOp<ttir::TTNNMetalLayoutCastOp>();
-    TT_assertv(
-        castOp,
-        "If one d2m.generic operand is from TTNN, they must all be from TTNN.");
-    auto producerCastOp =
-        castOp.getInput().getDefiningOp<ttir::TTNNMetalLayoutCastOp>();
-    if (producerCastOp) {
-      castOp.getResult().replaceAllUsesExcept(producerCastOp.getInput(),
-                                              producerCastOp);
-      continue;
+    if (castOp) {
+      auto producerCastOp =
+          castOp.getInput().getDefiningOp<ttir::TTNNMetalLayoutCastOp>();
+      if (producerCastOp) {
+        castOp.getResult().replaceAllUsesExcept(producerCastOp.getInput(),
+                                                producerCastOp);
+        continue;
+      }
     }
 
     llvm::SmallVector<int64_t> unshardedShape =
@@ -1207,12 +1230,22 @@ insertTTNNDRAMStreams(d2m::GenericOp genericOp,
     auto storageTensor = mlir::RankedTensorType::get(
         fakeShardedShape, metalTensor.getElementType(), storageLayout);
 
-    builder.setInsertionPointAfter(castOp);
-    auto storageOp =
-        builder.create<d2m::EmptyOp>(castOp.getLoc(), storageTensor);
+    // MOLA local patch (2026-05-04): without a cast op, anchor the
+    // stream insertion at the operand's defining op (or genericOp
+    // itself if the operand is a block argument), and replace uses
+    // of the operand value rather than the cast op's result.
+    Operation *anchor =
+        castOp ? static_cast<Operation *>(castOp)
+               : (operand.getDefiningOp() != nullptr
+                      ? operand.getDefiningOp()
+                      : static_cast<Operation *>(genericOp));
+    Value streamSource = castOp ? castOp.getResult() : operand;
+    Location loc = anchor->getLoc();
+    builder.setInsertionPointAfter(anchor);
+    auto storageOp = builder.create<d2m::EmptyOp>(loc, storageTensor);
     auto streamOp = builder.create<d2m::StreamLayoutOp>(
-        castOp.getLoc(), streamOutputTensor, castOp.getResult(), storageOp);
-    castOp.getResult().replaceAllUsesExcept(streamOp.getResult(), streamOp);
+        loc, streamOutputTensor, streamSource, storageOp);
+    streamSource.replaceAllUsesExcept(streamOp.getResult(), streamOp);
   }
 
   TT_assertv(llvm::all_of(optimalOperandGrids,
