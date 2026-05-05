@@ -749,8 +749,24 @@ memrefGlobalOpToFlatbufferByteVector(FlatbufferObjectCache &cache,
   flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data;
 
   if (mlir::isa<FloatType>(value.getElementType())) {
-    if (value.getElementType().getIntOrFloatBitWidth() == 32) {
+    unsigned const bw = value.getElementType().getIntOrFloatBitWidth();
+    if (bw == 32) {
       data = mlir::tt::toFlatbufferByteVector<float>(cache, initialValueAttr);
+    } else if (bw == 16) {
+      // bf16 (and f16): serialize as raw 16-bit bit patterns. The
+      // DenseElementsAttr exposes float values via APFloat with the
+      // appropriate semantics; we extract the raw bit pattern.
+      size_t const sizeBytes = initialValueAttr.getNumElements() *
+                                sizeof(uint16_t);
+      cache.fbb->StartVector<flatbuffers::Offset<uint8_t>>(sizeBytes);
+      for (auto it = initialValueAttr.value_begin<llvm::APFloat>();
+           it != initialValueAttr.value_end<llvm::APFloat>(); ++it) {
+        uint16_t bits = static_cast<uint16_t>(
+            (*it).bitcastToAPInt().getZExtValue());
+        uint8_t *buf = reinterpret_cast<uint8_t *>(&bits);
+        cache.fbb->PushBytes(buf, sizeof(uint16_t));
+      }
+      data = cache.fbb->EndVector(sizeBytes);
     } else {
       assert(false && "unsupported float bit width");
     }
