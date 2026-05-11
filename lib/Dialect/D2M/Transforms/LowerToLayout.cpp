@@ -274,12 +274,18 @@ class D2MLowerToLayoutRewriter : public OpRewritePattern<ToLayoutOp> {
             referenceLayout.getOobVal(), ttcore::MemorySpace::DeviceDRAM,
             ttcore::TensorMemoryLayout::Interleaved, newIndexMap);
       } else {
+        // MOLA local patch (2026-05-04): Layer 5 of the DRAM-input
+        // unblock chain. Upstream propagates the destination's
+        // memory_layout enum verbatim, but L1 doesn't support
+        // Interleaved. When constructing the L1 staging buffer for a
+        // DRAM-Interleaved destination, force memory_layout=Sharded
+        // (which is the only legal value for L1).
         layout = ttcore::MetalLayoutAttr::get(
             ctx, referenceLayout.getLogicalShape(),
             referenceLayout.getDimAlignments(),
             referenceLayout.getCollapsedIntervals(),
             referenceLayout.getOobVal(), ttcore::MemorySpace::DeviceL1,
-            referenceLayout.getMemoryLayout(), newIndexMap);
+            ttcore::TensorMemoryLayout::Sharded, newIndexMap);
       }
 
       ArrayRef<int64_t> tileShape;
@@ -329,6 +335,17 @@ class D2MLowerToLayoutRewriter : public OpRewritePattern<ToLayoutOp> {
         newIndexMap = baseLayout.getIndexAffineMap();
       }
 
+      // MOLA local patch (2026-05-04): force Sharded memory_layout
+      // when the staging memory space is L1, regardless of the base
+      // layout's enum. tt-metal's runtime requires Interleaved be
+      // DRAM-only — propagating baseLayout.getMemoryLayout() verbatim
+      // produces illegal L1+Interleaved staging buffers when the
+      // base tensor is DRAM+Interleaved.
+      ttcore::TensorMemoryLayout effMemoryLayout =
+          (memSpace == ttcore::MemorySpace::DeviceL1)
+              ? ttcore::TensorMemoryLayout::Sharded
+              : baseLayout.getMemoryLayout();
+
       ttcore::MetalLayoutAttr layout;
       if (hasVirtualGrid && reblockVirtualGridShapes) {
         // Recompute default collapsed intervals and dim alignments if virtual
@@ -339,13 +356,13 @@ class D2MLowerToLayoutRewriter : public OpRewritePattern<ToLayoutOp> {
         layout = ttcore::MetalLayoutAttr::get(
             ctx, baseLayout.getLogicalShape(), dimAlignments,
             collapsedIntervals, baseLayout.getOobVal(), memSpace,
-            baseLayout.getMemoryLayout(), AffineMap::get(ctx));
+            effMemoryLayout, AffineMap::get(ctx));
       } else {
         // Otherwise, preserve dim alignments and collapsed intervals.
         layout = ttcore::MetalLayoutAttr::get(
             ctx, baseLayout.getLogicalShape(), baseLayout.getDimAlignments(),
             baseLayout.getCollapsedIntervals(), baseLayout.getOobVal(),
-            memSpace, baseLayout.getMemoryLayout(), newIndexMap);
+            memSpace, effMemoryLayout, newIndexMap);
       }
 
       ArrayRef<int64_t> tileShape;

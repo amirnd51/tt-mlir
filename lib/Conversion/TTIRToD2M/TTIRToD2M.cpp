@@ -15,6 +15,7 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Utils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -264,6 +265,20 @@ protected:
       elementType = ttcore::TileType::get(elementType, tileShape);
     }
 
+    // MOLA local patch (2026-05-04, see
+    // /home/amirnass/projects/mola/docs/plans/priority-1-spike-2026-05-04.md):
+    // upstream's hardcoded `TensorMemoryLayout::Sharded` produces
+    // single-bank-sharded DRAM allocations that tt-metal's runtime
+    // can't dispatch (worker-coord vs DRAM-channel mismatch in
+    // get_dram_channel_from_logical_core). Interleaved is the
+    // production-tested DRAM layout. Branch on memory space so DRAM
+    // allocations land as interleaved while L1 stays sharded (the
+    // working production path for L1).
+    const ttcore::TensorMemoryLayout layoutKind =
+        (memSpace == ttcore::MemorySpace::DeviceDRAM)
+            ? ttcore::TensorMemoryLayout::Interleaved
+            : ttcore::TensorMemoryLayout::Sharded;
+
     ttcore::MetalLayoutAttr layout;
     if (!collapseTensors || noCollapse) {
       auto emptyIntervalType = RankedTensorType::get(
@@ -285,13 +300,13 @@ protected:
 
       layout = ttcore::MetalLayoutAttr::get(
           rewriter.getContext(), logicalShape, oobVal, memSpace,
-          ttcore::TensorMemoryLayout::Sharded, emptyCollapseIntervals,
+          layoutKind, emptyCollapseIntervals,
           coreVirtMap);
 
     } else {
       layout = ttcore::MetalLayoutAttr::get(
           rewriter.getContext(), logicalShape, oobVal, memSpace,
-          ttcore::TensorMemoryLayout::Sharded);
+          layoutKind);
     }
 
     // Get raw, unsharded physical shape.
@@ -1835,6 +1850,71 @@ class D2MFullOpRewriter : public OpConversionPattern<ttir::FullOp> {
   }
 };
 
+// MOLA local patch (2026-05-05, patch 08): D2MConstantOpRewriter.
+// Lowers ttir.constant (with DenseElementsAttr or DenseResourceElementsAttr
+// value) to arith.constant + d2m.to_layout. Splat ttir.constants are
+// canonicalized to ttir.full earlier and handled by D2MFullOpRewriter;
+// this pattern handles the non-splat case (real model weights via
+// dense_resource), required for any HuggingFace Llama checkpoint flow
+// through the new TTMetal chain.
+//
+// Approach: emit arith.constant with the LOGICAL (unencoded) tensor
+// type so it carries the original value attr. arith.constant tensor is
+// bufferizable by MLIR's standard bufferize patterns into a
+// memref::GlobalOp + memref::GetGlobalOp pair (the same shape the
+// flatbuffer translator already handles). Then a d2m.to_layout adds
+// the metal_layout encoding (DRAM/L1, sharded/interleaved) per the
+// type-converter's chosen target memory space, mirroring how
+// D2MEmptyOpRewriter + downstream layout conversion attaches encodings.
+class D2MConstantOpRewriter : public OpConversionPattern<ttir::ConstantOp> {
+  using OpConversionPattern<ttir::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    Type encodedResultType =
+        this->getTypeConverter()->convertType(op.getResult().getType());
+    if (!encodedResultType) {
+      return rewriter.notifyMatchFailure(
+          op, "type converter returned null for ttir.constant result");
+    }
+    auto encodedTensorTy = mlir::cast<RankedTensorType>(encodedResultType);
+
+    // Build arith.constant with the LOGICAL tensor type (no metal_layout
+    // encoding) so the value attr's shape matches the result type.
+    auto unencodedTy = RankedTensorType::get(encodedTensorTy.getShape(),
+                                              encodedTensorTy.getElementType());
+
+    // ttir.constant's value attr is ElementsAttr; arith.constant takes
+    // a TypedAttr. DenseElementsAttr and DenseResourceElementsAttr are
+    // both TypedAttrs.
+    auto valueAttr = mlir::dyn_cast<TypedAttr>(op.getValueAttr());
+    if (!valueAttr) {
+      return rewriter.notifyMatchFailure(
+          op, "ttir.constant value attr is not a TypedAttr");
+    }
+    if (auto shapedTy = mlir::dyn_cast<ShapedType>(valueAttr.getType())) {
+      if (shapedTy.getElementType() != unencodedTy.getElementType()) {
+        return rewriter.notifyMatchFailure(
+            op, "ttir.constant value element type doesn't match result");
+      }
+    }
+
+    auto cst = rewriter.create<mlir::arith::ConstantOp>(loc, unencodedTy,
+                                                         valueAttr);
+
+    // Add the metal_layout encoding via d2m.to_layout.
+    Value empty = rewriter.create<d2m::EmptyOp>(
+        loc, encodedTensorTy.getShape(), encodedTensorTy.getElementType(),
+        encodedTensorTy.getEncoding());
+    auto toLayout =
+        rewriter.create<d2m::ToLayoutOp>(loc, cst.getResult(), empty);
+    rewriter.replaceOp(op, toLayout.getResult(0));
+    return success();
+  }
+};
+
 class D2MArangeOpRewriter : public OpConversionPattern<ttir::ArangeOp>,
                             D2MNamedRewriterCommon {
 public:
@@ -2337,7 +2417,8 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
   patterns.add<D2MToLayoutOpRewriter>(typeConverter, ctx, ttnnMode);
 
   // Creation ops 1:1 conversion.
-  patterns.add<D2MEmptyOpRewriter, D2MFullOpRewriter>(typeConverter, ctx);
+  patterns.add<D2MEmptyOpRewriter, D2MFullOpRewriter, D2MConstantOpRewriter>(
+      typeConverter, ctx);
 
   // Mesh ops 1:1 conversion.
   patterns.add<D2MMeshShardOpRewriter>(typeConverter, ctx);
