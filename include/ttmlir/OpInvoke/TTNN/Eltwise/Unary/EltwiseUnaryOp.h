@@ -39,8 +39,7 @@ EltwiseUnaryResolvedParams resolveEltwiseUnaryParams(
 template <typename Tag>
 auto createEltwiseUnaryTuple(
     Tag tag, const ::tt::target::ttnn::EltwiseUnaryOpT &eltwiseUnaryOpT,
-    TensorArg input,
-    const EltwiseUnaryResolvedParams &params) {
+    TensorArg input, const EltwiseUnaryResolvedParams &params) {
   return std::make_tuple(resolveTensorArg(input, tag),
                          params.outputMemoryConfig,
                          /*optional_output_tensor=*/std::nullopt,
@@ -67,8 +66,7 @@ callEltwiseUnary(CallType callType,
 template <typename Tag>
 auto createEltwiseUnaryTanhTuple(
     Tag tag, const ::tt::target::ttnn::EltwiseUnaryOpT &eltwiseUnaryOpT,
-    TensorArg input,
-    const EltwiseUnaryResolvedParams &params) {
+    TensorArg input, const EltwiseUnaryResolvedParams &params) {
   LOG_ASSERT(params.approx.has_value(), "approx parameter not resolved");
   return std::make_tuple(
       resolveTensorArg(input, tag), params.outputMemoryConfig,
@@ -87,8 +85,7 @@ callEltwiseUnaryTanh(CallType callType,
       resolveEltwiseUnaryParams(eltwiseUnaryOpT);
 
   auto makeTuple = [&](auto tag) {
-    return createEltwiseUnaryTanhTuple(tag, eltwiseUnaryOpT, input,
-                                       params);
+    return createEltwiseUnaryTanhTuple(tag, eltwiseUnaryOpT, input, params);
   };
 
   callOp(ttnnOp);
@@ -97,8 +94,7 @@ callEltwiseUnaryTanh(CallType callType,
 template <typename Tag>
 auto createEltwiseUnaryWithFastAndApproximateModeTuple(
     Tag tag, const ::tt::target::ttnn::EltwiseUnaryOpT &eltwiseUnaryOpT,
-    TensorArg input,
-    const EltwiseUnaryResolvedParams &params) {
+    TensorArg input, const EltwiseUnaryResolvedParams &params) {
   return std::make_tuple(resolveTensorArg(input, tag),
                          /*approx=*/params.fastApproxMode,
                          params.outputMemoryConfig,
