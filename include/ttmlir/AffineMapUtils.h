@@ -522,6 +522,195 @@ createNDGridCollapseMap(mlir::ArrayRef<int64_t> gridShape,
   return mlir::AffineMap::get(gridRank + shardRank, 0, results, context);
 }
 
+namespace detail {
+
+/// Compiles an MLIR AffineMap into a register-based bytecode with common
+/// subexpression elimination. MLIR AffineExpr objects are pointer-uniqued, so
+/// shared subexpressions across results are compiled once and reused.
+class CompiledAffineMap {
+public:
+  explicit CompiledAffineMap(mlir::AffineMap map)
+      : numResults_(map.getNumResults()) {
+    llvm::DenseMap<mlir::AffineExpr, uint16_t> exprToReg;
+    resultRegs_.reserve(numResults_);
+    for (unsigned i = 0; i < numResults_; ++i) {
+      resultRegs_.push_back(compileExpr(map.getResult(i), exprToReg));
+    }
+  }
+
+  void evaluate(const int64_t *__restrict inputs,
+                int64_t *__restrict results) const {
+    int64_t regs[kMaxRegs];
+    const Instruction *code = code_.data();
+    unsigned codeSize = static_cast<unsigned>(code_.size());
+    for (unsigned pc = 0; pc < codeSize; ++pc) {
+      int64_t a, b, q, rem;
+      switch (code[pc].op) {
+      case Op::LoadDim:
+        regs[code[pc].dst] = inputs[code[pc].imm];
+        break;
+      case Op::LoadConst:
+        regs[code[pc].dst] = code[pc].imm;
+        break;
+      case Op::Add:
+        regs[code[pc].dst] = regs[code[pc].src1] + regs[code[pc].src2];
+        break;
+      case Op::Mul:
+        regs[code[pc].dst] = regs[code[pc].src1] * regs[code[pc].src2];
+        break;
+      case Op::FloorDiv:
+        a = regs[code[pc].src1];
+        b = regs[code[pc].src2];
+        q = a / b;
+        rem = a % b;
+        regs[code[pc].dst] = (rem != 0 && ((rem ^ b) < 0)) ? q - 1 : q;
+        break;
+      case Op::Mod:
+        a = regs[code[pc].src1];
+        b = regs[code[pc].src2];
+        rem = a % b;
+        regs[code[pc].dst] = (rem != 0 && ((rem ^ b) < 0)) ? rem + b : rem;
+        break;
+      case Op::CeilDiv:
+        a = regs[code[pc].src1];
+        b = regs[code[pc].src2];
+        q = a / b;
+        rem = a % b;
+        regs[code[pc].dst] = (rem != 0 && ((rem ^ b) > 0)) ? q + 1 : q;
+        break;
+      case Op::ShrImm:
+        regs[code[pc].dst] = regs[code[pc].src1] >> code[pc].imm;
+        break;
+      case Op::AndImm:
+        regs[code[pc].dst] = regs[code[pc].src1] & code[pc].imm;
+        break;
+      }
+    }
+    for (unsigned i = 0; i < numResults_; ++i) {
+      results[i] = regs[resultRegs_[i]];
+    }
+  }
+
+  unsigned getNumResults() const { return numResults_; }
+
+private:
+  static constexpr unsigned kMaxRegs = 512;
+
+  enum class Op : uint8_t {
+    LoadDim,
+    LoadConst,
+    Add,
+    Mul,
+    FloorDiv,
+    Mod,
+    CeilDiv,
+    ShrImm,
+    AndImm,
+  };
+
+  struct Instruction {
+    Op op;
+    uint16_t dst;
+    uint16_t src1;
+    uint16_t src2;
+    int64_t imm;
+  };
+
+  static bool isPowerOf2(int64_t v) { return v > 0 && (v & (v - 1)) == 0; }
+
+  uint16_t emitInstruction(mlir::AffineExpr expr, Instruction inst,
+                           llvm::DenseMap<mlir::AffineExpr, uint16_t> &map) {
+    auto reg = static_cast<uint16_t>(code_.size());
+    assert(reg < kMaxRegs);
+    inst.dst = reg;
+    code_.push_back(inst);
+    map[expr] = reg;
+    return reg;
+  }
+
+  uint16_t compileExpr(mlir::AffineExpr expr,
+                       llvm::DenseMap<mlir::AffineExpr, uint16_t> &exprToReg) {
+    auto it = exprToReg.find(expr);
+    if (it != exprToReg.end()) {
+      return it->second;
+    }
+
+    switch (expr.getKind()) {
+    case mlir::AffineExprKind::DimId:
+      return emitInstruction(
+          expr,
+          {Op::LoadDim, 0, 0, 0,
+           static_cast<int64_t>(
+               mlir::cast<mlir::AffineDimExpr>(expr).getPosition())},
+          exprToReg);
+    case mlir::AffineExprKind::SymbolId:
+      llvm_unreachable("Symbols not supported in compiled affine map");
+    case mlir::AffineExprKind::Constant:
+      return emitInstruction(
+          expr,
+          {Op::LoadConst, 0, 0, 0,
+           mlir::cast<mlir::AffineConstantExpr>(expr).getValue()},
+          exprToReg);
+    default:
+      break;
+    }
+
+    auto bin = mlir::cast<mlir::AffineBinaryOpExpr>(expr);
+    uint16_t lhs = compileExpr(bin.getLHS(), exprToReg);
+
+    // Power-of-2 specialization for FloorDiv and Mod: the RHS of these
+    // operations in MLIR affine expressions is always a constant.
+    if (expr.getKind() == mlir::AffineExprKind::FloorDiv ||
+        expr.getKind() == mlir::AffineExprKind::Mod) {
+      if (auto constRHS =
+              mlir::dyn_cast<mlir::AffineConstantExpr>(bin.getRHS())) {
+        int64_t val = constRHS.getValue();
+        if (isPowerOf2(val)) {
+          if (expr.getKind() == mlir::AffineExprKind::FloorDiv) {
+            return emitInstruction(
+                expr,
+                {Op::ShrImm, 0, lhs, 0,
+                 llvm::countr_zero(static_cast<uint64_t>(val))},
+                exprToReg);
+          }
+          return emitInstruction(expr, {Op::AndImm, 0, lhs, 0, val - 1},
+                                 exprToReg);
+        }
+      }
+    }
+
+    uint16_t rhs = compileExpr(bin.getRHS(), exprToReg);
+
+    Op binOp;
+    switch (expr.getKind()) {
+    case mlir::AffineExprKind::Add:
+      binOp = Op::Add;
+      break;
+    case mlir::AffineExprKind::Mul:
+      binOp = Op::Mul;
+      break;
+    case mlir::AffineExprKind::Mod:
+      binOp = Op::Mod;
+      break;
+    case mlir::AffineExprKind::FloorDiv:
+      binOp = Op::FloorDiv;
+      break;
+    case mlir::AffineExprKind::CeilDiv:
+      binOp = Op::CeilDiv;
+      break;
+    default:
+      llvm_unreachable("unexpected affine expr kind");
+    }
+    return emitInstruction(expr, {binOp, 0, lhs, rhs, 0}, exprToReg);
+  }
+
+  llvm::SmallVector<Instruction, 128> code_;
+  llvm::SmallVector<uint16_t, 8> resultRegs_;
+  unsigned numResults_;
+};
+
+} // namespace detail
+
 /// Calculates the coalescing factor for an affine map by sampling over the
 /// given input shape. The coalescing factor is the greatest common divisor of
 /// all contiguous run lengths, representing the maximum number of elements that
@@ -564,44 +753,75 @@ inline size_t calculateCoalescingFactor(mlir::AffineMap map,
     return 1;
   }
 
+  detail::CompiledAffineMap compiled(map);
+  unsigned numResults = compiled.getNumResults();
+  static constexpr unsigned kMaxResults = 16;
+  static constexpr unsigned kMaxDims = 16;
+  assert(numResults <= kMaxResults);
+  assert(map.getNumDims() <= kMaxDims);
+
   size_t shardVolume = volume(shardShape);
   size_t coalescingFactor = shardVolume;
 
-  mlir::SmallVector<int64_t> memoryIndex;
-  memoryIndex.resize(gridShape.size() + shardShape.size());
+  int64_t memoryIndex[kMaxDims] = {};
+
   sample(gridShape, [&](mlir::ArrayRef<int64_t> gridIndex) {
     if (coalescingFactor == 1) {
       return;
     }
+    for (unsigned i = 0; i < gridIndex.size(); i++) {
+      memoryIndex[i] = gridIndex[i];
+    }
+
+    for (unsigned i = 0; i < shardShape.size(); i++) {
+      memoryIndex[numGridDims + i] = 0;
+    }
+
     size_t currentCoalescingFactor = 0;
-    mlir::SmallVector<int64_t, 4> nextAddress;
-    sample(shardShape, [&](mlir::ArrayRef<int64_t> shardIndex) {
-      if (coalescingFactor == 1) {
-        return;
+    int64_t address[kMaxResults];
+    int64_t nextAddr[kMaxResults];
+    bool hasNext = false;
+
+    for (int64_t iter = 0, sv = static_cast<int64_t>(shardVolume); iter < sv;
+         ++iter) {
+      compiled.evaluate(memoryIndex, address);
+
+      bool contiguous = false;
+      if (hasNext) {
+        contiguous = true;
+        for (unsigned i = 0; i < numResults; ++i) {
+          if (address[i] != nextAddr[i]) {
+            contiguous = false;
+            break;
+          }
+        }
       }
-      for (unsigned i = 0; i < gridIndex.size(); i++) {
-        memoryIndex[i] = gridIndex[i];
-      }
-      for (unsigned i = 0; i < shardIndex.size(); i++) {
-        memoryIndex[gridIndex.size() + i] = shardIndex[i];
-      }
-      mlir::SmallVector<int64_t, 4> address = map.compose(memoryIndex);
-      if (nextAddress.empty() || nextAddress == address) {
+
+      if (!hasNext || contiguous) {
         ++currentCoalescingFactor;
       } else {
         coalescingFactor = std::gcd(coalescingFactor, currentCoalescingFactor);
-        // If coalescing factor reaches unit size, it cannot change further.
-        // Early exit to save on runtime.
         if (coalescingFactor == 1) {
-          return;
+          break;
         }
-        // current memory access can potentially be coalesced with next
-        // access!
         currentCoalescingFactor = 1;
       }
-      nextAddress = address;
-      nextAddress.back() += stride;
-    });
+
+      for (unsigned i = 0; i < numResults; ++i) {
+        nextAddr[i] = address[i];
+      }
+      nextAddr[numResults - 1] += stride;
+      hasNext = true;
+
+      // Increment shard coordinates (row-major order)
+      for (int j = static_cast<int>(numGridDims + shardShape.size()) - 1;
+           j >= static_cast<int>(numGridDims); --j) {
+        if (++memoryIndex[j] < shardShape[j - numGridDims]) {
+          break;
+        }
+        memoryIndex[j] = 0;
+      }
+    }
     // Account for final run
     coalescingFactor = std::gcd(coalescingFactor, currentCoalescingFactor);
   });
