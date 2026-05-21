@@ -172,8 +172,8 @@ getBinaryOpConstraints(OpT op, const std::vector<TTNNLayoutAttr> &inputs,
   }
 
   return opConstraintsCache().getOrCompute(
-      op_model::OpModel<OpT>::getOpConstraints, op, inputShapeA,
-      inputs[0], inputShapeB, inputs[1],
+      op_model::OpModel<OpT>::getOpConstraints, op, inputShapeA, inputs[0],
+      inputShapeB, inputs[1],
       detail::convertAttr<UnaryWithParamAttr>(op.getActivations()),
       detail::convertAttr<UnaryWithParamAttr>(op.getInputTensorAActivations()),
       detail::convertAttr<UnaryWithParamAttr>(op.getInputTensorBActivations()),
@@ -235,8 +235,8 @@ getReductionOpConstraints(OpT op, const std::vector<TTNNLayoutAttr> &inputs,
   assert(inputs.size() == 1);
   const auto inputShape = op.getInput().getType().getShape();
   return opConstraintsCache().getOrCompute(
-      op_model::OpModel<OpT>::getOpConstraints, op, inputShape,
-      inputs[0], detail::convertAttr<int64_t>(op.getDimArg()), op.getKeepDim(),
+      op_model::OpModel<OpT>::getOpConstraints, op, inputShape, inputs[0],
+      detail::convertAttr<int64_t>(op.getDimArg()), op.getKeepDim(),
       opConfig.outputLayout);
 }
 
@@ -1585,8 +1585,8 @@ SliceStaticOp::getOpConstraints(const std::vector<TTNNLayoutAttr> &inputs,
   const auto inputShape = getInput().getType().getShape();
 
   return opConstraintsCache().getOrCompute(
-      op_model::OpModel<SliceStaticOp>::getOpConstraints, *this,
-      inputShape, inputs[0], detail::convertAttr<int64_t>(getBegins()),
+      op_model::OpModel<SliceStaticOp>::getOpConstraints, *this, inputShape,
+      inputs[0], detail::convertAttr<int64_t>(getBegins()),
       detail::convertAttr<int64_t>(getEnds()),
       detail::convertAttr<int64_t>(getStep()), opConfig.outputLayout);
 }
@@ -1619,8 +1619,8 @@ SliceDynamicOp::getOpConstraints(const std::vector<TTNNLayoutAttr> &inputs,
   const auto endsShape = getEnds().getType().getShape();
 
   return opConstraintsCache().getOrCompute(
-      op_model::OpModel<SliceDynamicOp>::getOpConstraints, *this,
-      inputShape, inputs[0], beginsShape, inputs[1], endsShape, inputs[2],
+      op_model::OpModel<SliceDynamicOp>::getOpConstraints, *this, inputShape,
+      inputs[0], beginsShape, inputs[1], endsShape, inputs[2],
       detail::convertAttr<int64_t>(getStep()), opConfig.outputLayout);
 }
 
