@@ -579,6 +579,55 @@ void registerRuntimeBindings(nb::module_ &m) {
     )");
 
   m.def(
+      "get_tensor_global_id_from_pool",
+      [](tt::runtime::CallbackContext program_context_handle,
+         tt::runtime::TensorRef tensor_ref) {
+        return tt::runtime::getTensorGlobalIdFromPool(program_context_handle,
+                                                      tensor_ref);
+      },
+      nb::arg("program_context_handle"), nb::arg("tensor_ref"),
+      R"(
+    Return the stable Tensor::globalId for the pool-resident tensor referenced
+    by *tensor_ref*, without host transfer. The globalId is preserved across
+    program boundaries when output tensors of one program are passed as inputs
+    to another, so it can be used as a cross-program identity key.
+
+    Returns None if the tensor is not currently in the pool.
+    )");
+
+  m.def(
+      "register_pool_tensor_destroy_callback",
+      [](tt::runtime::CallbackContext program_context_handle,
+         tt::runtime::TensorRef tensor_ref, nb::callable callback) {
+        // Capture as a shared handle so the std::function is copyable even
+        // though nb::callable holds Python refs. The callback fires on the
+        // thread that destroys the wrapper - acquire the GIL before calling
+        // into Python.
+        auto cb_shared = std::make_shared<nb::callable>(std::move(callback));
+        return tt::runtime::registerPoolTensorDestroyCallback(
+            program_context_handle, tensor_ref, [cb_shared]() {
+              nb::gil_scoped_acquire gil;
+              try {
+                (*cb_shared)();
+              } catch (const std::exception &e) {
+                // Swallow exceptions - this runs during destruction and
+                // throwing here can abort the process.
+              }
+            });
+      },
+      nb::arg("program_context_handle"), nb::arg("tensor_ref"),
+      nb::arg("callback"),
+      R"(
+    Register a Python callback to fire when the underlying tensor wrapper of
+    the pool-resident tensor referenced by *tensor_ref* is destroyed. Useful
+    for eviction of session-scoped caches keyed by Tensor::globalId.
+
+    Returns True if the callback was registered (tensor was in the pool),
+    False otherwise. The callback receives no arguments; capture any state
+    you need (e.g. the globalId) in the closure at registration time.
+    )");
+
+  m.def(
       "update_tensor_in_pool",
       [](tt::runtime::CallbackContext program_context_handle,
          tt::runtime::TensorRef tensor_ref_handle,

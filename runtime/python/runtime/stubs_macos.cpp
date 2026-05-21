@@ -262,6 +262,16 @@ retrieveTensorFromPool(CallbackContext programContextHandle,
                        TensorRef tensorRef, bool untilize) {
   __builtin_trap();
 }
+std::optional<std::uint64_t>
+getTensorGlobalIdFromPool(CallbackContext programContextHandle,
+                          TensorRef tensorRef) {
+  __builtin_trap();
+}
+bool registerPoolTensorDestroyCallback(CallbackContext programContextHandle,
+                                       TensorRef tensorRef,
+                                       std::function<void()> callback) {
+  __builtin_trap();
+}
 std::vector<uint32_t> getTensorRefShape(TensorRef) { __builtin_trap(); }
 ::tt::target::DataType getTensorRefDataType(TensorRef) { __builtin_trap(); }
 void walkProgram(Binary, uint32_t, const OpWalkFn &) { __builtin_trap(); }

@@ -2222,6 +2222,51 @@ retrieveTensorFromPool(CallbackContext programContextHandle,
   return hostTensors[0];
 }
 
+std::optional<std::uint64_t>
+getTensorGlobalIdFromPool(CallbackContext programContextHandle,
+                          tt::runtime::TensorRef tensorRef) {
+  const auto &programContext =
+      programContextHandle.as<tt::runtime::ttnn::ProgramContext>(
+          DeviceRuntime::TTNN);
+  const ttnn::ProgramTensorPool &tensorPool = programContext.getTensorPool();
+
+  const auto *tensorRefPtr =
+      &tensorRef.as<tt::target::ttnn::TensorRef>(DeviceRuntime::TTNN);
+
+  if (!tensorRefPtr) {
+    LOG_WARNING("Tensor ref pointer is null in getTensorGlobalIdFromPool");
+    return std::nullopt;
+  }
+
+  if (!tensorPool.contains(tensorRefPtr)) {
+    return std::nullopt;
+  }
+
+  return tensorPool.getRuntimeTensorAndValidate(tensorRefPtr).getGlobalId();
+}
+
+bool registerPoolTensorDestroyCallback(CallbackContext programContextHandle,
+                                       tt::runtime::TensorRef tensorRef,
+                                       std::function<void()> callback) {
+  auto &programContext =
+      programContextHandle.as<tt::runtime::ttnn::ProgramContext>(
+          DeviceRuntime::TTNN);
+  ttnn::ProgramTensorPool &tensorPool = programContext.getTensorPool();
+
+  const auto *tensorRefPtr =
+      &tensorRef.as<tt::target::ttnn::TensorRef>(DeviceRuntime::TTNN);
+
+  if (!tensorRefPtr || !tensorPool.contains(tensorRefPtr)) {
+    return false;
+  }
+
+  ttnn::TTNNTensorWrapper &wrapper =
+      tensorPool.getTTNNTensorWrapperAndValidate(tensorRefPtr);
+  wrapper.registerOnDestroyCallback(
+      [cb = std::move(callback)](ttnn::TTNNTensorWrapper *) { cb(); });
+  return true;
+}
+
 std::vector<uint32_t> getTensorRefShape(tt::runtime::TensorRef tensorRef) {
   const auto &ref =
       tensorRef.as<::tt::target::ttnn::TensorRef>(DeviceRuntime::TTNN);

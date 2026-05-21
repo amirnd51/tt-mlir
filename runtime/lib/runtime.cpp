@@ -1200,6 +1200,46 @@ retrieveTensorFromPool(CallbackContext programContextHandle,
       });
 }
 
+std::optional<std::uint64_t>
+getTensorGlobalIdFromPool(CallbackContext programContextHandle,
+                          TensorRef tensorRef) {
+  using RetType = std::optional<std::uint64_t>;
+  return DISPATCH_TO_CURRENT_RUNTIME(
+      RetType,
+      [&]() -> RetType {
+        return tt::runtime::ttnn::getTensorGlobalIdFromPool(
+            programContextHandle, tensorRef);
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("getTensorGlobalIdFromPool",
+                                    DeviceRuntime::TTMetal);
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("getTensorGlobalIdFromPool",
+                                    HostRuntime::Distributed);
+      });
+}
+
+bool registerPoolTensorDestroyCallback(CallbackContext programContextHandle,
+                                       TensorRef tensorRef,
+                                       std::function<void()> callback) {
+  using RetType = bool;
+  return DISPATCH_TO_CURRENT_RUNTIME(
+      RetType,
+      [&]() -> RetType {
+        return tt::runtime::ttnn::registerPoolTensorDestroyCallback(
+            programContextHandle, tensorRef, std::move(callback));
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("registerPoolTensorDestroyCallback",
+                                    DeviceRuntime::TTMetal);
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("registerPoolTensorDestroyCallback",
+                                    HostRuntime::Distributed);
+      });
+}
+
 void updateTensorInPool(CallbackContext programContextHandle,
                         TensorRef tensorRef, Tensor srcTensor) {
   using RetType = void;

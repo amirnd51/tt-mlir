@@ -269,6 +269,24 @@ std::optional<Tensor>
 retrieveTensorFromPool(CallbackContext programContextHandle,
                        TensorRef tensorRef, bool untilize);
 
+// Returns the `Tensor::globalId` of the stored runtime Tensor referenced by
+// `tensorRef`, without host transfer or rewrapping. The globalId is stable
+// across program boundaries when the caller passes outputs of one program as
+// inputs to another, so it can be used as a cross-program identity key (e.g.
+// for chisel's multi-program golden accumulation).
+std::optional<std::uint64_t>
+getTensorGlobalIdFromPool(CallbackContext programContextHandle,
+                          TensorRef tensorRef);
+
+// Registers a callback to fire when the underlying tensor wrapper of the
+// pool's runtime Tensor for `tensorRef` is destroyed. Useful for evicting
+// pool entries keyed by `Tensor::globalId` once the tensor is no longer live.
+// Returns false if the tensorRef is not currently in the pool (callback is
+// not registered in that case).
+bool registerPoolTensorDestroyCallback(CallbackContext programContextHandle,
+                                       TensorRef tensorRef,
+                                       std::function<void()> callback);
+
 // Updates the tensor in the program's tensor pool that is referenced by the
 // given tensor reference. Performs necessary layout and device conversions to
 // match the existing tensor.

@@ -11,7 +11,7 @@ are recorded as chisel_bug.
 import logging
 from contextlib import contextmanager
 from enum import Enum
-from typing import Dict, Iterator, List
+from typing import Iterator, List
 
 from _ttmlir_runtime import runtime as tt_runtime
 from _ttmlir_runtime.binary import Binary
@@ -27,10 +27,12 @@ from .executor import (
     execute_golden_with_ssa_inputs,
 )
 from .op_configs import ChiselOpConfig
+from .op_handlers import _lookup_from_program_pool, _publish_to_program_pool
 from .ops import SSAName, get_op_inputs, get_op_outputs
 from .report import (
     ChiselRecord,
     GoldenPromotedPayload,
+    GoldenPromotionSource,
     NoGoldenPayload,
     NumericsMode,
     SkippedNumericsPayload,
@@ -104,6 +106,8 @@ def _default_pre_op(ctx: ChiselContext, config: ChiselOpConfig) -> None:
     _assert_op_matches_runtime(ctx)
     asm_state = ctx.asm_state
     pool = ctx.golden_tensor_pool
+    function_arg_ssas = ctx.function_arg_ssas
+    accumulation = ctx.checks_config.accumulation
 
     mlir_op_inputs = get_op_inputs(op)
     for mlir_input, rt_tensor_ref in zip(mlir_op_inputs, ctx.input_refs, strict=True):
@@ -115,13 +119,23 @@ def _default_pre_op(ctx: ChiselContext, config: ChiselOpConfig) -> None:
         if ssa in pool:
             continue
 
-        pool[ssa] = tensor
+        # Try cross-program lookup for function args under accumulation mode.
+        source = GoldenPromotionSource.DEVICE
+        if accumulation and ssa in function_arg_ssas:
+            cross_golden = _lookup_from_program_pool(ctx, rt_tensor_ref)
+            if cross_golden is not None:
+                pool[ssa] = cross_golden
+                source = GoldenPromotionSource.PROGRAM_POOL
+
+        if source is GoldenPromotionSource.DEVICE:
+            pool[ssa] = tensor
+
         ctx.write_record(
             ChiselRecord(
                 op=op.name,
                 check="golden_promoted",
                 ssa=ssa,
-                payload=GoldenPromotedPayload(),
+                payload=GoldenPromotedPayload(source=source),
             )
         )
 
@@ -175,6 +189,9 @@ def _default_post_op(ctx: ChiselContext, config: ChiselOpConfig) -> None:
     else:
         accum_outs = [None] * len(mlir_op_outputs)
 
+    function_output_ssas = ctx.function_output_ssas
+    publish_to_program_pool = ctx.checks_config.accumulation
+
     for mlir_output, output_ref, iso_out, accum_out in zip(
         mlir_op_outputs, ctx.output_refs, iso_outs, accum_outs, strict=True
     ):
@@ -204,6 +221,16 @@ def _default_post_op(ctx: ChiselContext, config: ChiselOpConfig) -> None:
                 mode=NumericsMode.ACCUMULATED,
                 skip_pcc=config.skip_pcc,
             )
+
+        # Publish the accumulated golden of function outputs to the
+        # session-scoped pool so a subsequent program consuming this tensor
+        # can chain from here. Only meaningful when accumulation is on.
+        if (
+            publish_to_program_pool
+            and accum_out is not None
+            and ssa in function_output_ssas
+        ):
+            _publish_to_program_pool(ctx, output_ref, accum_out)
 
 
 def run_op_callback(
