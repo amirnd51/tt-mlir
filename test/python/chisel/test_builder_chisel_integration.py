@@ -154,14 +154,14 @@ def test_chisel_records_chisel_bug_on_callback_raise(
     # raises. chisel_safe should swallow the exception, write a chisel_bug
     # record carrying the traceback, and the ttmlir runtime should finish
     # the program normally so the test exits the session cleanly.
-    import chisel.callbacks as chisel_callbacks
+    import chisel._callback_helpers as chisel_callback_helpers
 
     boom_message = "synthetic chisel bug for testing chisel_safe"
 
     def boom(*args, **kwargs):
         raise RuntimeError(boom_message)
 
-    monkeypatch.setattr(chisel_callbacks, "check_numerics", boom)
+    monkeypatch.setattr(chisel_callback_helpers, "check_numerics", boom)
 
     x_shape = (64, 128)
     w_shape = (256, 128)
