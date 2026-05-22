@@ -491,7 +491,10 @@ public:
     patterns.add<D2MLowerLocalCopyToFullyIndexed>(&getContext(),
                                                   debugCoalescingInference);
     populateAffineToStdConversionPatterns(patterns);
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
+    GreedyRewriteConfig config;
+    config.setRegionSimplificationLevel(GreedySimplifyRegionLevel::Disabled);
+    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns),
+                                     config))) {
       signalPassFailure();
     }
   }
