@@ -126,6 +126,12 @@ classifyAutoSearch(GenericOp genericOp,
   if (reductionDims.empty()) {
     SmallVector<std::size_t> candidateDims =
         getParticipatingDimsWithShardFactors(genericOp, shardFactors);
+    for (std::size_t reductionDim : reductionDims) {
+      if (shardFactors[reductionDim] > 1 &&
+          !llvm::is_contained(candidateDims, reductionDim)) {
+        candidateDims.push_back(reductionDim);
+      }
+    }
     if (candidateDims.empty()) {
       return std::nullopt;
     }
