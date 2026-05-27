@@ -1353,11 +1353,12 @@ createOp(FlatbufferObjectCache &cache, MoeComputeOp op) {
 
   auto activation = toFlatbuffer(cache, op.getActivationFunction());
 
-  ::tt::target::Topology topology = ::tt::target::Topology::Ring;
-  bool hasTopology = op.getTopology().has_value();
-  if (hasTopology) {
-    topology = toFlatbuffer(cache, op.getTopology().value());
-  }
+  // `num_links` and `topology` are schema-optional (uint32/Topology = null).
+  // Use the toFlatbuffer overloads that return flatbuffers::Optional<...> so
+  // unset attrs serialize as the absent marker rather than 0/Ring — tt-metal
+  // distinguishes the two (e.g. moe_compute asserts num_links > 0).
+  auto numLinks = toFlatbuffer(cache, op.getNumLinks());
+  auto topology = toFlatbuffer(cache, op.getTopology());
 
   ::flatbuffers::Offset<::tt::target::ttnn::CoreRangeSet> muxCoreRangeSet = 0;
   if (op.getMuxCoreRangeSetAttr()) {
@@ -1387,9 +1388,9 @@ createOp(FlatbufferObjectCache &cache, MoeComputeOp op) {
       *cache.fbb, tilizeInput, tilizeIndices, tilizeScores, tilizeMapping, w0w1,
       w2, optionalOutput, crossDeviceSemaphore, deviceRef, op.getLayerId(),
       op.getOutputHeightShardDim(), op.getIntermediateSize(), op.getHasBias(),
-      op.getClusterAxis(), activation, op.getNumLinks().value_or(0), topology,
-      muxCoreRangeSet, outputMemoryConfig, perExpertTokens, expertActivation,
-      expertToToken, tilizeOutput, matmulOutput, combineOutput);
+      op.getClusterAxis(), activation, numLinks, topology, muxCoreRangeSet,
+      outputMemoryConfig, perExpertTokens, expertActivation, expertToToken,
+      tilizeOutput, matmulOutput, combineOutput);
 }
 
 // Convert ttcore::ReduceType to tt::target::ttnn::ScatterReduceType

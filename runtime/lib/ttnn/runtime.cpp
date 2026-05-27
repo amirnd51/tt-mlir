@@ -526,9 +526,20 @@ Device openMeshDevice(const MeshDeviceOptions &options) {
 
   ::ttnn::MeshDeviceConfig meshConfig(meshShape, offset, options.deviceIds);
 
+  // Match tt-metal's moe_compute_6U device-params (WORKER + COL).
+  // ETH + COL is rejected by tt-metal's Python wrapper; mirror its silent
+  // coercion to WORKER here.
+  ::tt::tt_metal::DispatchCoreAxis dispatchCoreAxisValue =
+      ::tt::tt_metal::DispatchCoreAxis::COL;
+  if (dispatchCoreTypeValue == ::tt::tt_metal::DispatchCoreType::ETH) {
+    dispatchCoreTypeValue = ::tt::tt_metal::DispatchCoreType::WORKER;
+  }
+  ::tt::tt_metal::DispatchCoreConfig dispatchCoreConfig(dispatchCoreTypeValue,
+                                                         dispatchCoreAxisValue);
+
   std::shared_ptr<::ttnn::MeshDevice> meshDevice =
       ::ttnn::MeshDevice::create(meshConfig, l1SmallSize, traceRegionSize,
-                                 options.numHWCQs, dispatchCoreTypeValue);
+                                 options.numHWCQs, dispatchCoreConfig);
 
   if (options.enableProgramCache) {
     meshDevice->enable_program_cache();
@@ -730,7 +741,12 @@ getMemoryView(Device deviceHandle) {
 }
 
 void setFabricConfig(tt::runtime::FabricConfig config) {
-  ::tt::tt_fabric::SetFabricConfig(common::toMetalFabricConfig(config));
+  // Match tt-metal's moe_compute_6U device-params: RELAXED reliability so
+  // fabric init tolerates the channel-count differences this Galaxy
+  // reports on its 4x8 mesh-graph descriptor.
+  ::tt::tt_fabric::SetFabricConfig(
+      common::toMetalFabricConfig(config),
+      ::tt::tt_fabric::FabricReliabilityMode::RELAXED_SYSTEM_HEALTH_SETUP_MODE);
   RuntimeContext::instance().setCurrentFabricConfig(config);
 }
 
@@ -1445,6 +1461,21 @@ std::vector<tt::runtime::TensorRef> getOpOutputRefs(OpContext opContextHandle) {
     tensorRefs = {op->mapping(), op->reduced()};
     break;
   }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW0W1WeightsOp: {
+    tensorRefs = {opContext.type_as_PrepareMoEComputeW0W1WeightsOp()->out()};
+    break;
+  }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW2WeightsOp: {
+    tensorRefs = {opContext.type_as_PrepareMoEComputeW2WeightsOp()->out()};
+    break;
+  }
+  case ::tt::target::ttnn::OpType::MoeComputeOp: {
+    auto *op = opContext.type_as_MoeComputeOp();
+    tensorRefs = {op->per_expert_total_tokens(), op->expert_activation(),
+                  op->expert_to_token(),         op->tilize_output(),
+                  op->matmul_output(),           op->combine_output()};
+    break;
+  }
   case ::tt::target::ttnn::OpType::TopKOp: {
     tensorRefs = utils::convertFbTensorRefsToVector(
         opContext.type_as_TopKOp()->outputs());
@@ -1926,6 +1957,33 @@ std::vector<tt::runtime::TensorRef> getOpInputRefs(OpContext opContextHandle) {
     tensorRefs = {opContext.type_as_MoeExpertTokenRemapOp()->topk_tensor(),
                   opContext.type_as_MoeExpertTokenRemapOp()->expert_mapping(),
                   opContext.type_as_MoeExpertTokenRemapOp()->expert_metadata()};
+    break;
+  }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW0W1WeightsOp: {
+    auto *op = opContext.type_as_PrepareMoEComputeW0W1WeightsOp();
+    tensorRefs = {op->w0(), op->w1()};
+    if (op->bias_0() != nullptr) {
+      tensorRefs.push_back(op->bias_0());
+    }
+    if (op->bias_1() != nullptr) {
+      tensorRefs.push_back(op->bias_1());
+    }
+    break;
+  }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW2WeightsOp: {
+    auto *op = opContext.type_as_PrepareMoEComputeW2WeightsOp();
+    tensorRefs = {op->w2()};
+    if (op->bias_2() != nullptr) {
+      tensorRefs.push_back(op->bias_2());
+    }
+    break;
+  }
+  case ::tt::target::ttnn::OpType::MoeComputeOp: {
+    auto *op = opContext.type_as_MoeComputeOp();
+    tensorRefs = {
+        op->tilize_input_tensor(),         op->tilize_expert_indices_tensor(),
+        op->tilize_expert_scores_tensor(), op->tilize_expert_mapping_tensor(),
+        op->matmul_w0_w1_tensor(),         op->matmul_w2_tensor()};
     break;
   }
   case ::tt::target::ttnn::OpType::UpsampleOp: {

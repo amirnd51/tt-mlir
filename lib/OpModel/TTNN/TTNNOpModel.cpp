@@ -14,6 +14,7 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/OpModel/TTNN/Conversion.h"
 #include "ttmlir/OpModel/TTNN/SingletonDeviceContext.h"
+#include "ttmlir/SharedTTNN/MoEComputeWeightPrep.h"
 
 #include "mlir/IR/AttrTypeSubElements.h"
 #include "mlir/IR/Attributes.h"
@@ -831,7 +832,147 @@ getPrepareConv2dBiasOpOutputTensorSpec(
   return output.get().output_tensor_specs.value().at(0);
 }
 
+//===----------------------------------------------------------------------===//
+// PrepareMoEComputeW0W1WeightsOp / PrepareMoEComputeW2WeightsOp
+//===----------------------------------------------------------------------===//
+
+// The shared helpers below are thin adapters over tt-metal's C++
+// ttnn::experimental::prepare_w0_w1_tensor_for_moe_compute / _w2 entries; graph
+// capture traces them to derive the packed weight output spec.
+llvm::Expected<::ttnn::TensorSpec>
+getPrepareMoEComputeW0W1WeightsOpOutputTensorSpec(
+    llvm::ArrayRef<int64_t> w0Shape, TTNNLayoutAttr w0Layout,
+    llvm::ArrayRef<int64_t> w1Shape, TTNNLayoutAttr w1Layout,
+    std::optional<llvm::ArrayRef<int64_t>> bias0Shape,
+    std::optional<TTNNLayoutAttr> bias0Layout,
+    std::optional<llvm::ArrayRef<int64_t>> bias1Shape,
+    std::optional<TTNNLayoutAttr> bias1Layout, uint32_t hiddenSize,
+    uint32_t intermediateSize,
+    std::optional<MemoryConfigAttr> outputMemoryConfig) {
+  ::tt::tt_metal::distributed::MeshDevice *device =
+      SingletonDeviceContext::getInstance().getDevice();
+
+  ::ttnn::TensorSpec w0Spec = conversion::getTensorSpec(w0Shape, w0Layout);
+  ::ttnn::TensorSpec w1Spec = conversion::getTensorSpec(w1Shape, w1Layout);
+  ::tt::tt_metal::Tensor w0Tensor =
+      ::tt::tt_metal::create_device_tensor(w0Spec, device);
+  ::tt::tt_metal::Tensor w1Tensor =
+      ::tt::tt_metal::create_device_tensor(w1Spec, device);
+
+  std::optional<::tt::tt_metal::Tensor> b0Tensor;
+  if (bias0Shape && bias0Layout) {
+    ::ttnn::TensorSpec b0Spec =
+        conversion::getTensorSpec(*bias0Shape, *bias0Layout);
+    b0Tensor = ::tt::tt_metal::create_device_tensor(b0Spec, device);
+  }
+  std::optional<::tt::tt_metal::Tensor> b1Tensor;
+  if (bias1Shape && bias1Layout) {
+    ::ttnn::TensorSpec b1Spec =
+        conversion::getTensorSpec(*bias1Shape, *bias1Layout);
+    b1Tensor = ::tt::tt_metal::create_device_tensor(b1Spec, device);
+  }
+
+  // Caller-supplied output_memory_config is optional; the shared helper picks
+  // a bank-permuted HEIGHT_SHARDED layout when the caller passes the default
+  // INTERLEAVED/DRAM config.
+  ::tt::tt_metal::MemoryConfig outMemCfg =
+      outputMemoryConfig ? conversion::getMemoryConfig(*outputMemoryConfig)
+                         : ::tt::tt_metal::MemoryConfig{};
+
+  auto query = [=]() {
+    return ::ttnn::graph::query_op_constraints(
+        WRAP_OP(mlir::tt::ttnn::shared::prepare_moe_compute_w0_w1), device,
+        w0Tensor, w1Tensor, b0Tensor, b1Tensor, hiddenSize, intermediateSize,
+        device, outMemCfg);
+  };
+  auto output = operation::executeConstraintQuery(query);
+  if (!output) {
+    return output.takeError();
+  }
+  assert(output.get().output_tensor_specs.has_value() &&
+         !output.get().output_tensor_specs->empty());
+  return output.get().output_tensor_specs.value()[0];
+}
+
+llvm::Expected<::ttnn::TensorSpec>
+getPrepareMoEComputeW2WeightsOpOutputTensorSpec(
+    llvm::ArrayRef<int64_t> w2Shape, TTNNLayoutAttr w2Layout,
+    std::optional<llvm::ArrayRef<int64_t>> bias2Shape,
+    std::optional<TTNNLayoutAttr> bias2Layout, uint32_t hiddenSize,
+    uint32_t intermediateSize,
+    std::optional<MemoryConfigAttr> outputMemoryConfig) {
+  ::tt::tt_metal::distributed::MeshDevice *device =
+      SingletonDeviceContext::getInstance().getDevice();
+
+  ::ttnn::TensorSpec w2Spec = conversion::getTensorSpec(w2Shape, w2Layout);
+  ::tt::tt_metal::Tensor w2Tensor =
+      ::tt::tt_metal::create_device_tensor(w2Spec, device);
+
+  std::optional<::tt::tt_metal::Tensor> b2Tensor;
+  if (bias2Shape && bias2Layout) {
+    ::ttnn::TensorSpec b2Spec =
+        conversion::getTensorSpec(*bias2Shape, *bias2Layout);
+    b2Tensor = ::tt::tt_metal::create_device_tensor(b2Spec, device);
+  }
+
+  ::tt::tt_metal::MemoryConfig outMemCfg =
+      outputMemoryConfig ? conversion::getMemoryConfig(*outputMemoryConfig)
+                         : ::tt::tt_metal::MemoryConfig{};
+
+  auto query = [=]() {
+    return ::ttnn::graph::query_op_constraints(
+        WRAP_OP(mlir::tt::ttnn::shared::prepare_moe_compute_w2), device,
+        w2Tensor, b2Tensor, hiddenSize, intermediateSize, device, outMemCfg);
+  };
+  auto output = operation::executeConstraintQuery(query);
+  if (!output) {
+    return output.takeError();
+  }
+  assert(output.get().output_tensor_specs.has_value() &&
+         !output.get().output_tensor_specs->empty());
+  return output.get().output_tensor_specs.value()[0];
+}
+
 #endif // TTMLIR_ENABLE_OPMODEL
+
+llvm::Expected<OpConstraints>
+OpModel<PrepareMoEComputeW0W1WeightsOp>::getOpConstraints(
+    ttcore::GridAttr deviceGrid, llvm::ArrayRef<int64_t> w0Shape,
+    TTNNLayoutAttr w0Layout, llvm::ArrayRef<int64_t> w1Shape,
+    TTNNLayoutAttr w1Layout, std::optional<llvm::ArrayRef<int64_t>> bias0Shape,
+    std::optional<TTNNLayoutAttr> bias0Layout,
+    std::optional<llvm::ArrayRef<int64_t>> bias1Shape,
+    std::optional<TTNNLayoutAttr> bias1Layout, uint32_t hiddenSize,
+    uint32_t intermediateSize,
+    std::optional<MemoryConfigAttr> outputMemoryConfig,
+    TTNNLayoutAttr outputLayout) {
+#ifdef TTMLIR_ENABLE_OPMODEL
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "PrepareMoEComputeW0W1WeightsOp constraints not wired up yet");
+#else
+  return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                 "Op model not enabled");
+#endif
+}
+
+llvm::Expected<OpConstraints>
+OpModel<PrepareMoEComputeW2WeightsOp>::getOpConstraints(
+    ttcore::GridAttr deviceGrid, llvm::ArrayRef<int64_t> w2Shape,
+    TTNNLayoutAttr w2Layout, std::optional<llvm::ArrayRef<int64_t>> bias2Shape,
+    std::optional<TTNNLayoutAttr> bias2Layout, uint32_t hiddenSize,
+    uint32_t intermediateSize,
+    std::optional<MemoryConfigAttr> outputMemoryConfig,
+    TTNNLayoutAttr outputLayout) {
+#ifdef TTMLIR_ENABLE_OPMODEL
+  return llvm::createStringError(
+      llvm::inconvertibleErrorCode(),
+      "PrepareMoEComputeW2WeightsOp constraints not wired up yet");
+#else
+  return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                 "Op model not enabled");
+#endif
+}
 
 //===----------------------------------------------------------------------===//
 // Device

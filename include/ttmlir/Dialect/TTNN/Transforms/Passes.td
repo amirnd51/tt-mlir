@@ -344,6 +344,21 @@ def TTNNPrepareConv2dWeightsAndBias : Pass<"ttnn-prepare-conv2d-weights-and-bias
   }];
 }
 
+def TTNNPrepareMoEComputeWeights : Pass<"ttnn-prepare-moe-compute-weights", "::mlir::ModuleOp"> {
+  let summary = "Refine result types of ttnn.prepare_moe_compute_w0_w1_weights / _w2_weights using OpModel.";
+  let description = [{
+    The shared C++ helpers `mlir::tt::ttnn::shared::prepare_moe_compute_w0_w1` /
+    `_w2` produce a 6-D packed tensor with a bank-permuted DRAM
+    HEIGHT_SHARDED memory config. The exact shape and layout depend on the
+    target device's DRAM bank layout and the hidden/intermediate sizes; the
+    TTIR caller cannot know them up front. This pass walks the
+    prepare_moe_compute_*_weights ops emerging from TTIR->TTNN conversion
+    and replaces their (placeholder) result type with the OpModel-derived
+    spec obtained via graph-captured query of the shared helper.
+    Requires -DTTMLIR_ENABLE_OPMODEL=ON.
+  }];
+}
+
 def TTNNFusing: Pass<"ttnn-fusing", "::mlir::ModuleOp">
 {
   let summary = "TTNN fusing pass.";

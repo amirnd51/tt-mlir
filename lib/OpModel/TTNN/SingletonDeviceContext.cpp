@@ -101,7 +101,24 @@ void SingletonDeviceContext::openDevice(
       metalArch = ::tt::ARCH::QUASAR;
       break;
     }
-    ::tt::tt_metal::experimental::configure_mock_mode(metalArch, numChips);
+    // 6U Wormhole Galaxy chips report compute_with_storage_grid_size (x=7,
+    // y=10), distinguishing them from T3K Wormhole chips (x=7, y=8). Mock
+    // mode keys its cluster-descriptor lookup on (arch, num_chips) — for
+    // num_chips in {1, 2, 4, 8} on Wormhole it picks single-Wormhole or T3K
+    // cluster descs, neither of which matches a 6U Galaxy chip's grid. When
+    // the captured system_desc shows 6U Galaxy chips (grid y == 10), force
+    // num_chips=32 in mock mode so it picks 6u_cluster_desc.yaml; the
+    // caller-supplied mesh_shape opens a submesh view of the 32-chip mock
+    // cluster (see mock_device_util.cpp's "case 16" comment for the same
+    // pattern with the 1x16 torus topology).
+    uint32_t mockNumChips = numChips;
+    if (metalArch == ::tt::ARCH::WORMHOLE_B0) {
+      auto grid = m_systemDesc.getChipDesc(0).getGrid();
+      if (grid.size() == 2 && grid[0] == 10 && numChips < 32) {
+        mockNumChips = 32;
+      }
+    }
+    ::tt::tt_metal::experimental::configure_mock_mode(metalArch, mockNumChips);
   }
 
   // todo: this replicates logic in
@@ -111,6 +128,16 @@ void SingletonDeviceContext::openDevice(
   ::tt::tt_metal::DispatchCoreType dispatchCoreType =
       numDevices == numPCIeDevices ? ::tt::tt_metal::DispatchCoreType::WORKER
                                    : ::tt::tt_metal::DispatchCoreType::ETH;
+  // Mirror runtime/lib/ttnn/runtime.cpp / runtime/lib/common/system_desc.cpp:
+  // moe_compute requires DispatchCoreAxis::COL. ETH + COL is rejected by
+  // tt-metal's Python wrapper and produces an invalid DRAM-bank-to-worker
+  // mapping; coerce to WORKER so the OpModel mock device's compute grid
+  // matches the runtime mesh device the produced binary will run on.
+  if (dispatchCoreType == ::tt::tt_metal::DispatchCoreType::ETH) {
+    dispatchCoreType = ::tt::tt_metal::DispatchCoreType::WORKER;
+  }
+  ::tt::tt_metal::DispatchCoreConfig dispatchCoreConfig(
+      dispatchCoreType, ::tt::tt_metal::DispatchCoreAxis::COL);
 
   ::tt::tt_metal::distributed::MeshShape shape{
       meshShape ? static_cast<unsigned int>(meshShape->first) : 1,
@@ -118,7 +145,7 @@ void SingletonDeviceContext::openDevice(
   m_device = ::tt::tt_metal::distributed::MeshDevice::create(
       ::tt::tt_metal::distributed::MeshDeviceConfig{shape},
       ::tt::constants::L1_SMALL_SIZE, traceRegionSize,
-      /* num_hw_cqs = */ 1, dispatchCoreType);
+      /* num_hw_cqs = */ 1, dispatchCoreConfig);
 
   m_device->disable_and_clear_program_cache();
 }
@@ -135,6 +162,11 @@ void SingletonDeviceContext::reshapeMeshDevice(
   ::tt::tt_metal::DispatchCoreType dispatchCoreType =
       numDevices == numPCIeDevices ? ::tt::tt_metal::DispatchCoreType::WORKER
                                    : ::tt::tt_metal::DispatchCoreType::ETH;
+  if (dispatchCoreType == ::tt::tt_metal::DispatchCoreType::ETH) {
+    dispatchCoreType = ::tt::tt_metal::DispatchCoreType::WORKER;
+  }
+  ::tt::tt_metal::DispatchCoreConfig dispatchCoreConfig(
+      dispatchCoreType, ::tt::tt_metal::DispatchCoreAxis::COL);
 
   ::tt::tt_metal::distributed::MeshShape shape{
       static_cast<unsigned int>(meshShape.first),
@@ -142,7 +174,7 @@ void SingletonDeviceContext::reshapeMeshDevice(
   m_device = ::tt::tt_metal::distributed::MeshDevice::create(
       ::tt::tt_metal::distributed::MeshDeviceConfig{shape},
       ::tt::constants::L1_SMALL_SIZE, traceRegionSize,
-      /* num_hw_cqs = */ 1, dispatchCoreType);
+      /* num_hw_cqs = */ 1, dispatchCoreConfig);
 
   m_device->disable_and_clear_program_cache();
 }

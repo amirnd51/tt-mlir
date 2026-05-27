@@ -21,8 +21,11 @@
 #include "operations/ccl/distribute_tensor.h"
 #include "operations/ccl/mesh_partition.h"
 #include "operations/ccl/mesh_shard.h"
+#include "operations/ccl/moe_compute.h"
 #include "operations/ccl/moe_expert_token_remap.h"
 #include "operations/ccl/point_to_point.h"
+#include "operations/ccl/prepare_moe_compute_w0_w1_weights.h"
+#include "operations/ccl/prepare_moe_compute_w2_weights.h"
 #include "operations/ccl/reduce_scatter.h"
 #include "operations/ccl/selective_reduce_combine.h"
 #include "operations/context/get_device.h"
@@ -551,6 +554,17 @@ void ProgramExecutor::runOperation(const ::tt::target::ttnn::Operation *op) {
   case ::tt::target::ttnn::OpType::MoeExpertTokenRemapOp: {
     return operations::ccl::run(op->type_as_MoeExpertTokenRemapOp(),
                                 getContext());
+  }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW0W1WeightsOp: {
+    return operations::ccl::run(op->type_as_PrepareMoEComputeW0W1WeightsOp(),
+                                getContext());
+  }
+  case ::tt::target::ttnn::OpType::PrepareMoEComputeW2WeightsOp: {
+    return operations::ccl::run(op->type_as_PrepareMoEComputeW2WeightsOp(),
+                                getContext());
+  }
+  case ::tt::target::ttnn::OpType::MoeComputeOp: {
+    return operations::ccl::run(op->type_as_MoeComputeOp(), getContext());
   }
   case ::tt::target::ttnn::OpType::MeshShardOp: {
     return operations::ccl::run(op->type_as_MeshShardOp(), getContext());

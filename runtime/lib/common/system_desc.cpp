@@ -285,11 +285,20 @@ createNewMeshDevice(
 
   ::tt::tt_metal::DispatchCoreType type =
       tt::runtime::common::getDispatchCoreType(dispatchCoreType);
+  // Mirror the runtime's openMeshDevice (runtime/lib/ttnn/runtime.cpp): use
+  // WORKER + COL so the system_desc grid we capture here matches what the
+  // runtime mesh device will report at execution time. ETH + COL is rejected
+  // by tt-metal's Python wrapper; coerce to WORKER.
+  if (type == ::tt::tt_metal::DispatchCoreType::ETH) {
+    type = ::tt::tt_metal::DispatchCoreType::WORKER;
+  }
+  ::tt::tt_metal::DispatchCoreConfig dispatchCoreConfig(
+      type, ::tt::tt_metal::DispatchCoreAxis::COL);
 
   return ::tt::tt_metal::distributed::MeshDevice::create(
       ::tt::tt_metal::distributed::MeshDeviceConfig(
           /*mesh_shape=*/std::nullopt),
-      DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE, 1, type);
+      DEFAULT_L1_SMALL_SIZE, DEFAULT_TRACE_REGION_SIZE, 1, dispatchCoreConfig);
 }
 
 ::tt::runtime::SystemDesc getCurrentSystemDesc(

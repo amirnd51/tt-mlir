@@ -1721,6 +1721,56 @@ def ttir_moe_expert_token_remap_golden(
     return mapping, reduced
 
 
+def ttir_moe_compute_golden(
+    tilize_input_tensor: GoldenMapTensor,
+    tilize_expert_indices_tensor: GoldenMapTensor,
+    tilize_expert_scores_tensor: GoldenMapTensor,
+    tilize_expert_mapping_tensor: GoldenMapTensor,
+    matmul_w0_w1_tensor: GoldenMapTensor,
+    matmul_w2_tensor: GoldenMapTensor,
+    layer_id=0,
+    output_height_shard_dim=0,
+    intermediate_size=0,
+    has_bias=False,
+    cluster_axis=0,
+    activation_function=None,
+    num_links=None,
+    topology=None,
+    output_types_mlir: Optional[List[Type]] = None,
+) -> Tuple[
+    GoldenMapTensor,
+    GoldenMapTensor,
+    GoldenMapTensor,
+    GoldenMapTensor,
+    GoldenMapTensor,
+    GoldenMapTensor,
+]:
+    """Stub golden: 6 zero-tensor outputs matching the result types declared by
+    the op. The real reference is in
+    third_party/tt-metal/.../tests/nightly/tg/ccl/moe/test_moe_compute_6U.py;
+    this placeholder lets the compiler pipeline run end-to-end without
+    asserting numerical fidelity."""
+    mesh_shape = tilize_input_tensor.mesh_shape
+    num_shards = mesh_shape[0] * mesh_shape[1]
+    out: List[GoldenMapTensor] = []
+    if output_types_mlir is None:
+        # Fall back to input shape/dtype if the caller didn't supply types.
+        shapes = [tuple(int(d) for d in tilize_input_tensor.shape)] * 6
+        dtypes = [tilize_input_tensor.dtype] * 6
+    else:
+        shapes = [tuple(int(d) for d in t.shape) for t in output_types_mlir]
+        dtypes = [mlir_type_to_torch_dtype(t.element_type) for t in output_types_mlir]
+    for shape, dtype in zip(shapes, dtypes):
+        placeholder = torch.zeros(shape, dtype=dtype)
+        out.append(
+            GoldenMapTensor(
+                {i: placeholder.clone() for i in range(num_shards)},
+                mesh_shape=mesh_shape,
+            )
+        )
+    return tuple(out)
+
+
 def ttir_matmul_golden(
     a: GoldenMapTensor,
     b: GoldenMapTensor,
@@ -7807,6 +7857,7 @@ GOLDEN_MAPPINGS: Dict[type, Callable] = {
     ttir.AllToAllDispatchMetadataOp: ttir_all_to_all_dispatch_metadata_golden,
     ttir.AllToAllCombineOp: ttir_all_to_all_combine_golden,
     ttir.MoeExpertTokenRemapOp: ttir_moe_expert_token_remap_golden,
+    ttir.MoeComputeOp: ttir_moe_compute_golden,
     # Operations with parameter transformations
     ttir.LeakyReluOp: leaky_relu_golden,
     # Attention operations
@@ -7990,6 +8041,7 @@ GOLDEN_MAPPINGS: Dict[type, Callable] = {
     ttnn.AllReduceAsyncOp: ttnn_all_reduce_async_golden,
     ttnn.ReduceScatterOp: ttnn_reduce_scatter_golden,
     ttnn.MoeExpertTokenRemapOp: ttir_moe_expert_token_remap_golden,
+    ttnn.MoeComputeOp: ttir_moe_compute_golden,
     # ----- DEBUG OPS -----
     debug.AnnotateOp: debug_annotate_golden,
     debug.RegionStartOp: debug_region_start_golden,

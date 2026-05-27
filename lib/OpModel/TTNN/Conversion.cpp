@@ -680,7 +680,9 @@ TTNNLayoutAttr getLayoutAttrFromTensorSpec(MLIRContext *context,
                              tensorSpec.memory_config().memory_layout()));
 
   llvm::SmallVector<int64_t> gridShape = {1, 1};
-  if (isL1BufferType(bufferType)) {
+  // L1 buffers always carry their grid via memory_config; sharded DRAM
+  // buffers do too (bank-permuted CoreRangeSets used by moe_compute prep).
+  if (isL1BufferType(bufferType) || tensorSpec.memory_config().is_sharded()) {
     gridShape = getLogicalGridShape(tensorSpec.memory_config(), deviceGrid);
   }
 

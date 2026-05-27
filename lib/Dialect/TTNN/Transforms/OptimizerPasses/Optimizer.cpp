@@ -278,6 +278,14 @@ public:
           return;
         }
 
+        // Ops marked `OpModelExempt` (e.g. ttnn.moe_compute) deliberately
+        // opt out of constraint analysis. We must not reassign their output
+        // layouts: a workaround pattern has already chosen the exact
+        // shape/layout/memory_config that the runtime kernel will produce.
+        if (op->hasTrait<OpModelExempt>()) {
+          return;
+        }
+
         RankedTensorType tensorType =
             mlir::cast<RankedTensorType>(op->getResult(0).getType());
 
@@ -413,6 +421,13 @@ public:
         }
 
         if (!isa<RankedTensorType>(op->getResult(0).getType())) {
+          return;
+        }
+
+        // Skip OpModelExempt ops — their output layouts are chosen by
+        // dedicated workaround passes (see e.g. MoeComputeRewritePattern)
+        // and must not be overridden by the generic optimizer.
+        if (op->hasTrait<OpModelExempt>()) {
           return;
         }
 

@@ -3003,48 +3003,15 @@ void MoeComputeOp::allocateBuffers(::mlir::RewriterBase &rewriter) {
 }
 // NOLINTEND(clang-analyzer-core.StackAddressEscape)
 
-bool MoeComputeOp::hasUnboundSemaphores() { return !getCrossDeviceSemaphore(); }
+// The cross-device semaphore is intentionally left unbound: the moe_compute
+// kernel allocates it internally on its own `combine_core_range_set` (a small
+// subset of cores under {(5,0),(6,7)} — see tt-metal's
+// moe_compute_program_factory.cpp), which the compiler cannot mirror without
+// duplicating tt-metal's core-allocation policy. The runtime translates an
+// unbound semaphore field to std::nullopt and lets tt-metal create one.
+bool MoeComputeOp::hasUnboundSemaphores() { return false; }
 
-// NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
-void MoeComputeOp::allocateSemaphores(::mlir::RewriterBase &rewriter) {
-  if (!hasUnboundSemaphores()) {
-    return;
-  }
-
-  // Derive the semaphore core range from a sharded output of the op. The
-  // combine_output is DRAM-interleaved so it can't carry the worker grid; the
-  // tilize_output (result 3) is HEIGHT_SHARDED via the workaround pattern and
-  // pins down the workers that participate in the A2A combine.
-  auto tilizeOutType =
-      mlir::cast<RankedTensorType>(getTilizeOutput().getType());
-  auto tilizeOutLayout =
-      mlir::cast<TTNNLayoutAttr>(tilizeOutType.getEncoding());
-  CoreRangeSetAttr coreRangeSet = tilizeOutLayout.getCoreRangeSet();
-  assert(coreRangeSet &&
-         "tilize_output layout must carry a core range set before semaphore "
-         "allocation (expected MoeComputeRewritePattern to set it).");
-  std::optional<CoreRangeAttr> semaphoreCoreRange =
-      coreRangeSet.getBoundingBox();
-  assert(semaphoreCoreRange.has_value() &&
-         "tilize_output layout must have at least one core range for "
-         "semaphore allocation");
-
-  auto device = utils::getOrInsertDevice(rewriter, *this);
-
-  ttnn::CreateGlobalSemaphoreOp semaphoreOp;
-  {
-    OpBuilder::InsertionGuard guard(rewriter);
-    rewriter.setInsertionPointAfter(device);
-    semaphoreOp = rewriter.create<ttnn::CreateGlobalSemaphoreOp>(
-        getLoc(), GlobalSemaphoreType::get(rewriter.getContext()),
-        /*initial_value=*/rewriter.getUI32IntegerAttr(0), *semaphoreCoreRange);
-  }
-
-  rewriter.modifyOpInPlace(*this, [&]() {
-    getCrossDeviceSemaphoreMutable().assign(semaphoreOp.getResult());
-  });
-}
-// NOLINTEND(clang-analyzer-core.StackAddressEscape)
+void MoeComputeOp::allocateSemaphores(::mlir::RewriterBase &rewriter) {}
 
 //===----------------------------------------------------------------------===//
 // AllocOp
