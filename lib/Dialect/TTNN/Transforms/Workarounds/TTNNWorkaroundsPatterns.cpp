@@ -640,7 +640,7 @@ public:
     if (decompositionWorkaroundsEnabled) {
       RewritePatternSet patterns(&getContext());
       patterns.add<
-          GatherSi32Workaround, TTNNAllReduceWorkarounds,
+          GatherSi32Workaround,
           workarounds::decomposition::TTNNAllReduceReshapeWorkarounds,
           workarounds::decomposition::TTNNAllGatherWorkarounds,
           workarounds::decomposition::TTNNReduceScatterWorkarounds,
