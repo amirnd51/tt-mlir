@@ -422,6 +422,31 @@ struct EmitPyTypeConverter<mlir::tt::ttcore::Topology> {
 };
 
 template <>
+struct EmitPyTypeConverter<mlir::tt::ttcore::MoEActivationFunction> {
+  static std::optional<std::string> convert(mlir::Attribute attr) {
+    if (auto fnAttr = mlir::dyn_cast_if_present<
+            mlir::tt::ttcore::MoEActivationFunctionAttr>(attr)) {
+      return convert(fnAttr);
+    }
+    return {};
+  }
+
+  static std::string convert(mlir::tt::ttcore::MoEActivationFunctionAttr attr) {
+    return convert(attr.getValue());
+  }
+
+  static std::string convert(::mlir::tt::ttcore::MoEActivationFunction fn) {
+    switch (fn) {
+    case ::mlir::tt::ttcore::MoEActivationFunction::Silu:
+      return "ttnn.experimental.MoEActivationFunction.SILU";
+    case ::mlir::tt::ttcore::MoEActivationFunction::SwiGLU:
+      return "ttnn.experimental.MoEActivationFunction.SWIGLU";
+    }
+    llvm_unreachable("Unknown ::mlir::tt::ttcore::MoEActivationFunction");
+  }
+};
+
+template <>
 struct EmitPyTypeConverter<mlir::tt::ttcore::ReduceType> {
   static std::optional<std::string> convert(mlir::Attribute attr) {
     if (auto reduceTypeAttr =
@@ -2113,6 +2138,11 @@ struct TTNNTarget<tt::ttnn::LayerNormShardedMultiCoreProgramConfigAttr> {
 template <>
 struct TTNNTarget<tt::ttnn::SDPAProgramConfigAttr> {
   using type = ::ttnn::operations::transformer::SDPAProgramConfig;
+};
+
+template <>
+struct TTNNTarget<tt::ttnn::CoreRangeSetAttr> {
+  using type = ::ttnn::CoreRangeSet;
 };
 
 // Marker type for matmul program config union (AnyAttrOf<[...]>)

@@ -130,6 +130,8 @@ void createTTNNPipelineAnalysisPasses(
                     validationOptions));
             innerPm.addPass(
                 mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNPrepareMoEComputeWeights());
           },
           wrapperOptions));
     } else {
@@ -170,6 +172,8 @@ void createTTNNPipelineAnalysisPasses(
                     validationOptions));
             innerPm.addPass(
                 mlir::tt::ttnn::createTTNNPrepareConv2dWeightsAndBias());
+            innerPm.addPass(
+                mlir::tt::ttnn::createTTNNPrepareMoEComputeWeights());
           },
           wrapperOptions));
     }

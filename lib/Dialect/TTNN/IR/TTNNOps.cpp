@@ -2906,6 +2906,147 @@ void mlir::tt::ttnn::ToLayoutOp::getCanonicalizationPatterns(
 }
 
 //===----------------------------------------------------------------------===//
+// PrepareMoEComputeW0W1WeightsOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult PrepareMoEComputeW0W1WeightsOp::verify() {
+  if (getHiddenSize() == 0 || getHiddenSize() % 32 != 0) {
+    return emitOpError("hidden_size must be a positive multiple of 32");
+  }
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  if (static_cast<bool>(getBias_0()) != static_cast<bool>(getBias_1())) {
+    return emitOpError("bias_0 and bias_1 must be both present or both absent");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PrepareMoEComputeW2WeightsOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult PrepareMoEComputeW2WeightsOp::verify() {
+  if (getHiddenSize() == 0 || getHiddenSize() % 32 != 0) {
+    return emitOpError("hidden_size must be a positive multiple of 32");
+  }
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MoeComputeOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult MoeComputeOp::verify() {
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  if (getOutputHeightShardDim() == 0) {
+    return emitOpError("output_height_shard_dim must be positive");
+  }
+  if (getClusterAxis() > 1) {
+    return emitOpError("cluster_axis must be 0 or 1");
+  }
+
+  RankedTensorType inputType = getTilizeInputTensor().getType();
+  if (inputType.getRank() < 2) {
+    return emitOpError("tilize_input_tensor must have rank >= 2");
+  }
+  int64_t hiddenSize = inputType.getShape().back();
+  if (hiddenSize <= 0 || hiddenSize % 32 != 0) {
+    return emitOpError(
+        "tilize_input_tensor last dim (hidden_size) must be a positive "
+        "multiple of 32");
+  }
+
+  return success();
+}
+
+bool MoeComputeOp::hasUnboundBuffers() { return !getOptionalOutputTensor(); }
+
+// NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
+void MoeComputeOp::allocateBuffers(::mlir::RewriterBase &rewriter) {
+  if (!hasUnboundBuffers()) {
+    return;
+  }
+
+  // Materialize the combine-output scratch buffer by copying the type already
+  // declared on the combine_output result. The runtime hands this buffer to
+  // tt-metal's selective-reduce-combine via `optional_output_tensor`.
+  RankedTensorType combineType =
+      mlir::cast<RankedTensorType>(getCombineOutput().getType());
+  auto combineLayout = mlir::cast<TTNNLayoutAttr>(combineType.getEncoding());
+
+  MLIRContext *ctx = rewriter.getContext();
+  auto shapeAttr = ShapeAttr::get(ctx, combineType.getShape());
+  auto dtypeAttr = ttcore::DataTypeAttr::get(ctx, combineLayout.getDataType());
+  auto layoutAttr = LayoutAttr::get(ctx, combineLayout.getLayout());
+
+  auto device = utils::getOrInsertDevice(rewriter, *this);
+
+  // Same prelude placement / trace-hoist constraint as DistributedRMSNormOp:
+  // EmptyOp is host-allocated and must sit before the trace body.
+  ttnn::EmptyOp emptyOp;
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(device);
+    emptyOp = rewriter.create<ttnn::EmptyOp>(getLoc(), combineType, device,
+                                             shapeAttr, dtypeAttr, layoutAttr);
+  }
+
+  rewriter.modifyOpInPlace(*this, [&]() {
+    getOptionalOutputTensorMutable().assign(emptyOp.getResult());
+  });
+}
+// NOLINTEND(clang-analyzer-core.StackAddressEscape)
+
+bool MoeComputeOp::hasUnboundSemaphores() { return !getCrossDeviceSemaphore(); }
+
+// NOLINTBEGIN(clang-analyzer-core.StackAddressEscape)
+void MoeComputeOp::allocateSemaphores(::mlir::RewriterBase &rewriter) {
+  if (!hasUnboundSemaphores()) {
+    return;
+  }
+
+  // Derive the semaphore core range from a sharded output of the op. The
+  // combine_output is DRAM-interleaved so it can't carry the worker grid; the
+  // tilize_output (result 3) is HEIGHT_SHARDED via the workaround pattern and
+  // pins down the workers that participate in the A2A combine.
+  auto tilizeOutType =
+      mlir::cast<RankedTensorType>(getTilizeOutput().getType());
+  auto tilizeOutLayout =
+      mlir::cast<TTNNLayoutAttr>(tilizeOutType.getEncoding());
+  CoreRangeSetAttr coreRangeSet = tilizeOutLayout.getCoreRangeSet();
+  assert(coreRangeSet &&
+         "tilize_output layout must carry a core range set before semaphore "
+         "allocation (expected MoeComputeRewritePattern to set it).");
+  std::optional<CoreRangeAttr> semaphoreCoreRange =
+      coreRangeSet.getBoundingBox();
+  assert(semaphoreCoreRange.has_value() &&
+         "tilize_output layout must have at least one core range for "
+         "semaphore allocation");
+
+  auto device = utils::getOrInsertDevice(rewriter, *this);
+
+  ttnn::CreateGlobalSemaphoreOp semaphoreOp;
+  {
+    OpBuilder::InsertionGuard guard(rewriter);
+    rewriter.setInsertionPointAfter(device);
+    semaphoreOp = rewriter.create<ttnn::CreateGlobalSemaphoreOp>(
+        getLoc(), GlobalSemaphoreType::get(rewriter.getContext()),
+        /*initial_value=*/rewriter.getUI32IntegerAttr(0), *semaphoreCoreRange);
+  }
+
+  rewriter.modifyOpInPlace(*this, [&]() {
+    getCrossDeviceSemaphoreMutable().assign(semaphoreOp.getResult());
+  });
+}
+// NOLINTEND(clang-analyzer-core.StackAddressEscape)
+
+//===----------------------------------------------------------------------===//
 // AllocOp
 //===----------------------------------------------------------------------===//
 

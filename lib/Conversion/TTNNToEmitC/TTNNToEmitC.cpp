@@ -4109,6 +4109,160 @@ public:
 };
 } // namespace
 
+// PrepareMoEComputeW0W1WeightsOp conversion pattern
+//
+namespace {
+class PrepareMoEComputeW0W1WeightsOpConversionPattern
+    : public TTNNToEmitCBaseOpConversionPattern<
+          mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.prepare_moe_compute_w0_w1_weights";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn::experimental::prepare_moe_compute_w0_w1";
+  }
+
+public:
+  using TTNNToEmitCBaseOpConversionPattern<
+      mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp>::
+      TTNNToEmitCBaseOpConversionPattern;
+
+  LogicalResult matchAndRewrite(
+      mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp srcOp,
+      mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp::Adaptor adaptor,
+      ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitc::EmitCTTNNEmitter<
+        mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp>
+        emitter(srcOp, adaptor, rewriter);
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getW0()),
+        emitter.emit(srcOp.getW1()),
+        emitter.emit(srcOp.getBias_0()),
+        emitter.emit(srcOp.getBias_1()),
+        emitter.emit(srcOp.getHiddenSize()),
+        emitter.emit(srcOp.getIntermediateSize()),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr()),
+    };
+    emitter.replaceOp(*this, args);
+    return success();
+  }
+};
+} // namespace
+
+// PrepareMoEComputeW2WeightsOp conversion pattern
+//
+namespace {
+class PrepareMoEComputeW2WeightsOpConversionPattern
+    : public TTNNToEmitCBaseOpConversionPattern<
+          mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.prepare_moe_compute_w2_weights";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn::experimental::prepare_moe_compute_w2";
+  }
+
+public:
+  using TTNNToEmitCBaseOpConversionPattern<
+      mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp>::
+      TTNNToEmitCBaseOpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp srcOp,
+                  mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitc::EmitCTTNNEmitter<
+        mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp>
+        emitter(srcOp, adaptor, rewriter);
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getW2()),
+        emitter.emit(srcOp.getBias_2()),
+        emitter.emit(srcOp.getHiddenSize()),
+        emitter.emit(srcOp.getIntermediateSize()),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr()),
+    };
+    emitter.replaceOp(*this, args);
+    return success();
+  }
+};
+} // namespace
+
+// MoeComputeOp conversion pattern
+//
+namespace {
+class MoeComputeOpConversionPattern
+    : public TTNNToEmitCBaseOpConversionPattern<mlir::tt::ttnn::MoeComputeOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.moe_compute";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn::experimental::moe_compute";
+  }
+
+public:
+  using TTNNToEmitCBaseOpConversionPattern<
+      mlir::tt::ttnn::MoeComputeOp>::TTNNToEmitCBaseOpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::tt::ttnn::MoeComputeOp srcOp,
+                  mlir::tt::ttnn::MoeComputeOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitc::EmitCTTNNEmitter<mlir::tt::ttnn::MoeComputeOp> emitter(
+        srcOp, adaptor, rewriter);
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getTilizeInputTensor()),
+        emitter.emit(srcOp.getTilizeExpertIndicesTensor()),
+        emitter.emit(srcOp.getTilizeExpertScoresTensor()),
+        emitter.emit(srcOp.getTilizeExpertMappingTensor()),
+        emitter.emit(srcOp.getMatmulW0W1Tensor()),
+        emitter.emit(srcOp.getMatmulW2Tensor()),
+        emitter.emit(srcOp.getLayerId()),
+        emitter.emit(srcOp.getOutputHeightShardDim()),
+        emitter.emit(srcOp.getIntermediateSize()),
+        emitter.emit(srcOp.getHasBias()),
+        emitter.emit(srcOp.getClusterAxis()),
+        emitter.emit(srcOp.getTopology()),
+        emitter.emit(srcOp.getNumLinks()),
+        emitter.emit(srcOp.getMuxCoreRangeSetAttr()),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr()),
+        emitter.emit(srcOp.getOptionalOutputTensor()),
+        emitter.emit(srcOp.getCrossDeviceSemaphore()),
+        emitter.emit(srcOp.getActivationFunction()),
+    };
+
+    using ReturnTy = std::vector<::ttnn::Tensor>;
+    auto callOp = rewriter.create<emitc::CallOpaqueOp>(
+        srcOp.getLoc(),
+        rewriter.getType<emitc::OpaqueType>(ttnn_to_emitc::TypeNameV<ReturnTy>),
+        this->convertOpName(srcOp), rewriter.getArrayAttr(args),
+        /*template_args=*/nullptr, adaptor.getOperands());
+
+    SmallVector<Value> results;
+    for (unsigned i = 0; i < srcOp.getNumResults(); ++i) {
+      auto indexOp = rewriter.create<emitc::LiteralOp>(
+          srcOp.getLoc(), rewriter.getIndexType(), std::to_string(i));
+      auto lvalueType = emitc::LValueType::get(emitc::OpaqueType::get(
+          rewriter.getContext(),
+          ttnn_to_emitc::TypeNameV<ReturnTy::value_type>));
+      auto subscriptOp = rewriter.create<emitc::SubscriptOp>(
+          srcOp.getLoc(), lvalueType, callOp.getResult(0), indexOp.getResult());
+      auto loadOp = rewriter.create<emitc::LoadOp>(
+          srcOp.getLoc(),
+          emitc::OpaqueType::get(
+              rewriter.getContext(),
+              ttnn_to_emitc::TypeNameV<ReturnTy::value_type>),
+          subscriptOp.getResult());
+      results.push_back(loadOp.getResult());
+    }
+    rewriter.replaceOp(srcOp, results);
+    return success();
+  }
+};
+} // namespace
+
 // MoeExpertTokenRemapOp conversion pattern
 //
 namespace {
@@ -5464,6 +5618,11 @@ void populateTTNNToEmitCPatterns(mlir::MLIRContext *ctx,
   patterns.add<AllToAllDispatchMetadataOpConversionPattern>(typeConverter, ctx);
   patterns.add<AllToAllCombineOpConversionPattern>(typeConverter, ctx);
   patterns.add<MoeExpertTokenRemapOpConversionPattern>(typeConverter, ctx);
+  patterns.add<PrepareMoEComputeW0W1WeightsOpConversionPattern>(typeConverter,
+                                                                ctx);
+  patterns.add<PrepareMoEComputeW2WeightsOpConversionPattern>(typeConverter,
+                                                              ctx);
+  patterns.add<MoeComputeOpConversionPattern>(typeConverter, ctx);
 
   // KV Cache ops
   //

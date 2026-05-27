@@ -16882,6 +16882,412 @@ class TTIRBuilder(Builder):
 
         return token_remap_module, token_remap_builder
 
+    ############### ttir.PrepareMoEComputeW0W1WeightsOp ###############
+
+    @tag(ttir.PrepareMoEComputeW0W1WeightsOp)
+    def prepare_moe_compute_w0_w1_weights(
+        self,
+        w0: Operand,
+        w1: Operand,
+        hidden_size: int,
+        intermediate_size: int,
+        bias_0: Optional[Operand] = None,
+        bias_1: Optional[Operand] = None,
+        result_shape: Optional[Shape] = None,
+        result_type: Optional[torch.dtype] = None,
+        unit_attrs: Optional[List[str]] = None,
+    ) -> OpResult:
+        assert (
+            result_shape is not None
+        ), "result_shape must be provided for prepare_moe_compute_w0_w1_weights"
+        assert (
+            result_type is not None
+        ), "result_type must be provided for prepare_moe_compute_w0_w1_weights"
+
+        mlir_result_type = self._get_type_from_torch_dtype(result_type)
+        result = self._create_ranked_tensor_type(result_shape, mlir_result_type)
+
+        hidden_size_attr = IntegerAttr.get(IntegerType.get_unsigned(32), hidden_size)
+        intermediate_size_attr = IntegerAttr.get(
+            IntegerType.get_unsigned(32), intermediate_size
+        )
+
+        loc = self._get_location()
+
+        op = ttir.PrepareMoEComputeW0W1WeightsOp(
+            result,
+            w0,
+            w1,
+            hidden_size_attr,
+            intermediate_size_attr,
+            bias_0=bias_0,
+            bias_1=bias_1,
+            loc=loc,
+        )
+
+        if unit_attrs is not None:
+            for attr_name in unit_attrs:
+                op.operation.attributes[attr_name] = UnitAttr.get(self._ctx)
+
+        golden = GoldenMapTensor(
+            {0: torch.zeros(result_shape, dtype=result_type)},
+            mesh_shape=self._mesh_shape,
+        )
+        self._set_golden_tensor(op.result, golden)
+        return op.result
+
+    @parse(ttir.PrepareMoEComputeW0W1WeightsOp)
+    def prepare_moe_compute_w0_w1_weights_parser(
+        self,
+        old_op: ttir.PrepareMoEComputeW0W1WeightsOp,
+        global_dict: Dict[Operand, Operand],
+    ) -> Tuple[Operation, Dict[OpResult, OpResult]]:
+        ttir_op = self.get_opview_from_parser(
+            TTIRBuilder.prepare_moe_compute_w0_w1_weights_parser
+        )
+
+        w0 = global_dict[old_op.w0]
+        w1 = global_dict[old_op.w1]
+        bias_0 = global_dict.get(old_op.bias_0) if old_op.bias_0 else None
+        bias_1 = global_dict.get(old_op.bias_1) if old_op.bias_1 else None
+        result_type = old_op.result.type
+
+        new_op = ttir_op(
+            result_type,
+            w0,
+            w1,
+            old_op.hidden_size,
+            old_op.intermediate_size,
+            bias_0=bias_0,
+            bias_1=bias_1,
+            loc=old_op.location,
+        )
+
+        result_shape = tuple(int(dim) for dim in result_type.shape)
+        result_dtype = mlir_type_to_torch_dtype(result_type.element_type)
+        golden = GoldenMapTensor(
+            {0: torch.zeros(result_shape, dtype=result_dtype)},
+            mesh_shape=self._mesh_shape,
+        )
+        self._set_golden_tensor(new_op.result, golden)
+
+        return new_op, {old_op.result: new_op.result}
+
+    @split(ttir.PrepareMoEComputeW0W1WeightsOp)
+    def prepare_moe_compute_w0_w1_weights_split(
+        self,
+        old_op: ttir.PrepareMoEComputeW0W1WeightsOp,
+    ) -> Tuple[Module, TTIRBuilder]:
+        ttir_op = self.get_opview_from_split(
+            TTIRBuilder.prepare_moe_compute_w0_w1_weights_split
+        )
+
+        old_ctx = old_op.context
+        old_loc = Location.unknown(old_ctx)
+        with old_ctx, old_loc:
+            module = Module.create()
+            builder = TTIRBuilder(
+                old_ctx, old_loc, mesh_name=self._mesh_name, mesh_dict=self._mesh_dict
+            )
+            op_input_types = [old_op.w0.type, old_op.w1.type]
+            if old_op.bias_0:
+                op_input_types.append(old_op.bias_0.type)
+            if old_op.bias_1:
+                op_input_types.append(old_op.bias_1.type)
+
+            with InsertionPoint(module.body):
+                ordered_inputs = []
+                ordered_outputs = []
+
+                @func.func(
+                    *op_input_types, name="prepare_moe_compute_w0_w1_weights_module"
+                )
+                def decorated_func(*inputs):
+                    w0 = inputs[0]
+                    w1 = inputs[1]
+                    bias_0 = inputs[2] if old_op.bias_0 else None
+                    bias_1 = (
+                        inputs[3 if old_op.bias_0 else 2] if old_op.bias_1 else None
+                    )
+                    result_type = old_op.result.type
+
+                    new_op = ttir_op(
+                        result_type,
+                        w0,
+                        w1,
+                        old_op.hidden_size,
+                        old_op.intermediate_size,
+                        bias_0=bias_0,
+                        bias_1=bias_1,
+                        loc=old_op.location,
+                    )
+
+                    builder._set_golden_tensor(
+                        new_op.result, self._get_golden_tensor(old_op.result)
+                    )
+                    builder._set_golden_tensor(w0, self._get_golden_tensor(old_op.w0))
+                    builder._set_golden_tensor(w1, self._get_golden_tensor(old_op.w1))
+                    ordered_inputs.extend([w0, w1])
+                    if bias_0 is not None:
+                        builder._set_golden_tensor(
+                            bias_0, self._get_golden_tensor(old_op.bias_0)
+                        )
+                        ordered_inputs.append(bias_0)
+                    if bias_1 is not None:
+                        builder._set_golden_tensor(
+                            bias_1, self._get_golden_tensor(old_op.bias_1)
+                        )
+                        ordered_inputs.append(bias_1)
+                    ordered_outputs.append(new_op.result)
+                    return new_op
+
+                new_func_op = decorated_func.func_op
+                builder._func_ops_generated[new_func_op] = [
+                    ordered_inputs,
+                    ordered_outputs,
+                ]
+        return module, builder
+
+    ############### ttir.PrepareMoEComputeW2WeightsOp ###############
+
+    @tag(ttir.PrepareMoEComputeW2WeightsOp)
+    def prepare_moe_compute_w2_weights(
+        self,
+        w2: Operand,
+        hidden_size: int,
+        intermediate_size: int,
+        bias_2: Optional[Operand] = None,
+        result_shape: Optional[Shape] = None,
+        result_type: Optional[torch.dtype] = None,
+        unit_attrs: Optional[List[str]] = None,
+    ) -> OpResult:
+        assert (
+            result_shape is not None
+        ), "result_shape must be provided for prepare_moe_compute_w2_weights"
+        assert (
+            result_type is not None
+        ), "result_type must be provided for prepare_moe_compute_w2_weights"
+
+        mlir_result_type = self._get_type_from_torch_dtype(result_type)
+        result = self._create_ranked_tensor_type(result_shape, mlir_result_type)
+
+        hidden_size_attr = IntegerAttr.get(IntegerType.get_unsigned(32), hidden_size)
+        intermediate_size_attr = IntegerAttr.get(
+            IntegerType.get_unsigned(32), intermediate_size
+        )
+
+        loc = self._get_location()
+
+        op = ttir.PrepareMoEComputeW2WeightsOp(
+            result,
+            w2,
+            hidden_size_attr,
+            intermediate_size_attr,
+            bias_2=bias_2,
+            loc=loc,
+        )
+
+        if unit_attrs is not None:
+            for attr_name in unit_attrs:
+                op.operation.attributes[attr_name] = UnitAttr.get(self._ctx)
+
+        golden = GoldenMapTensor(
+            {0: torch.zeros(result_shape, dtype=result_type)},
+            mesh_shape=self._mesh_shape,
+        )
+        self._set_golden_tensor(op.result, golden)
+        return op.result
+
+    @parse(ttir.PrepareMoEComputeW2WeightsOp)
+    def prepare_moe_compute_w2_weights_parser(
+        self,
+        old_op: ttir.PrepareMoEComputeW2WeightsOp,
+        global_dict: Dict[Operand, Operand],
+    ) -> Tuple[Operation, Dict[OpResult, OpResult]]:
+        ttir_op = self.get_opview_from_parser(
+            TTIRBuilder.prepare_moe_compute_w2_weights_parser
+        )
+
+        w2 = global_dict[old_op.w2]
+        bias_2 = global_dict.get(old_op.bias_2) if old_op.bias_2 else None
+        result_type = old_op.result.type
+
+        new_op = ttir_op(
+            result_type,
+            w2,
+            old_op.hidden_size,
+            old_op.intermediate_size,
+            bias_2=bias_2,
+            loc=old_op.location,
+        )
+
+        result_shape = tuple(int(dim) for dim in result_type.shape)
+        result_dtype = mlir_type_to_torch_dtype(result_type.element_type)
+        golden = GoldenMapTensor(
+            {0: torch.zeros(result_shape, dtype=result_dtype)},
+            mesh_shape=self._mesh_shape,
+        )
+        self._set_golden_tensor(new_op.result, golden)
+
+        return new_op, {old_op.result: new_op.result}
+
+    @split(ttir.PrepareMoEComputeW2WeightsOp)
+    def prepare_moe_compute_w2_weights_split(
+        self,
+        old_op: ttir.PrepareMoEComputeW2WeightsOp,
+    ) -> Tuple[Module, TTIRBuilder]:
+        ttir_op = self.get_opview_from_split(
+            TTIRBuilder.prepare_moe_compute_w2_weights_split
+        )
+
+        old_ctx = old_op.context
+        old_loc = Location.unknown(old_ctx)
+        with old_ctx, old_loc:
+            module = Module.create()
+            builder = TTIRBuilder(
+                old_ctx, old_loc, mesh_name=self._mesh_name, mesh_dict=self._mesh_dict
+            )
+            op_input_types = [old_op.w2.type]
+            if old_op.bias_2:
+                op_input_types.append(old_op.bias_2.type)
+
+            with InsertionPoint(module.body):
+                ordered_inputs = []
+                ordered_outputs = []
+
+                @func.func(
+                    *op_input_types, name="prepare_moe_compute_w2_weights_module"
+                )
+                def decorated_func(*inputs):
+                    w2 = inputs[0]
+                    bias_2 = inputs[1] if old_op.bias_2 else None
+                    result_type = old_op.result.type
+
+                    new_op = ttir_op(
+                        result_type,
+                        w2,
+                        old_op.hidden_size,
+                        old_op.intermediate_size,
+                        bias_2=bias_2,
+                        loc=old_op.location,
+                    )
+
+                    builder._set_golden_tensor(
+                        new_op.result, self._get_golden_tensor(old_op.result)
+                    )
+                    builder._set_golden_tensor(w2, self._get_golden_tensor(old_op.w2))
+                    ordered_inputs.append(w2)
+                    if bias_2 is not None:
+                        builder._set_golden_tensor(
+                            bias_2, self._get_golden_tensor(old_op.bias_2)
+                        )
+                        ordered_inputs.append(bias_2)
+                    ordered_outputs.append(new_op.result)
+                    return new_op
+
+                new_func_op = decorated_func.func_op
+                builder._func_ops_generated[new_func_op] = [
+                    ordered_inputs,
+                    ordered_outputs,
+                ]
+        return module, builder
+
+    ############### ttir.MoeComputeOp ###############
+
+    @tag(ttir.MoeComputeOp)
+    def moe_compute(
+        self,
+        tilize_input_tensor: Operand,
+        tilize_expert_indices_tensor: Operand,
+        tilize_expert_scores_tensor: Operand,
+        tilize_expert_mapping_tensor: Operand,
+        matmul_w0_w1_tensor: Operand,
+        matmul_w2_tensor: Operand,
+        layer_id: int,
+        output_height_shard_dim: int,
+        intermediate_size: int,
+        has_bias: bool,
+        cluster_axis: int,
+        activation_function: str = "silu",
+        num_links: Optional[int] = None,
+        topology: Optional[str] = None,
+        output_shapes: Optional[List[Shape]] = None,
+        output_types: Optional[List[torch.dtype]] = None,
+        unit_attrs: Optional[List[str]] = None,
+    ) -> Tuple[OpResult, OpResult, OpResult, OpResult, OpResult, OpResult]:
+        assert (
+            output_shapes is not None and len(output_shapes) == 6
+        ), "output_shapes must be a list of 6 shapes for moe_compute"
+        assert (
+            output_types is not None and len(output_types) == 6
+        ), "output_types must be a list of 6 dtypes for moe_compute"
+
+        result_types = [
+            self._create_ranked_tensor_type(
+                shape, self._get_type_from_torch_dtype(dtype)
+            )
+            for shape, dtype in zip(output_shapes, output_types)
+        ]
+
+        u32 = IntegerType.get_unsigned(32)
+        layer_id_attr = IntegerAttr.get(u32, layer_id)
+        output_height_shard_dim_attr = IntegerAttr.get(u32, output_height_shard_dim)
+        intermediate_size_attr = IntegerAttr.get(u32, intermediate_size)
+        has_bias_attr = BoolAttr.get(has_bias)
+        cluster_axis_attr = IntegerAttr.get(u32, cluster_axis)
+        activation_attr = Attribute.parse(
+            f"#ttcore.moe_activation_function<{activation_function}>"
+        )
+        num_links_attr = (
+            IntegerAttr.get(u32, num_links) if num_links is not None else None
+        )
+        topology_attr = (
+            Attribute.parse(f"#ttcore.topology<{topology}>")
+            if topology is not None
+            else None
+        )
+
+        loc = self._get_location()
+
+        op = ttir.MoeComputeOp(
+            result_types[0],
+            result_types[1],
+            result_types[2],
+            result_types[3],
+            result_types[4],
+            result_types[5],
+            tilize_input_tensor,
+            tilize_expert_indices_tensor,
+            tilize_expert_scores_tensor,
+            tilize_expert_mapping_tensor,
+            matmul_w0_w1_tensor,
+            matmul_w2_tensor,
+            layer_id_attr,
+            output_height_shard_dim_attr,
+            intermediate_size_attr,
+            has_bias_attr,
+            cluster_axis_attr,
+            activation_function=activation_attr,
+            num_links=num_links_attr,
+            topology=topology_attr,
+            loc=loc,
+        )
+
+        if unit_attrs is not None:
+            for attr_name in unit_attrs:
+                op.operation.attributes[attr_name] = UnitAttr.get(self._ctx)
+
+        for i, (result, shape, dtype) in enumerate(
+            zip(op.results, output_shapes, output_types)
+        ):
+            golden = GoldenMapTensor(
+                {0: torch.zeros(shape, dtype=dtype)},
+                mesh_shape=self._mesh_shape,
+            )
+            self._set_golden_tensor(result, golden)
+
+        return tuple(op.results)
+
     def upsample2d(
         self,
         in0: Operand,

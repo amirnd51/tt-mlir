@@ -1827,6 +1827,99 @@ public:
 } // namespace
 
 namespace {
+class PrepareMoEComputeW0W1WeightsOpConversionPattern
+    : public OpConversionPattern<ttir::PrepareMoEComputeW0W1WeightsOp> {
+public:
+  using OpConversionPattern<
+      ttir::PrepareMoEComputeW0W1WeightsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::PrepareMoEComputeW0W1WeightsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto device = ::ttnn::utils::getOrInsertDevice(rewriter, op);
+
+    // Build the TTNN op first with the type-converted TTIR result type as a
+    // placeholder; OpModel-driven type refinement happens in a later step.
+    // TODO(moe_compute): replace this with a direct call to
+    // op_model::getPreparedMoEComputeW0W1WeightsOutputType once
+    // getPrepareMoEComputeW0W1WeightsOpOutputTensorSpec is wired to
+    // query_op_constraints against shared::prepare_moe_compute_w0_w1 (or
+    // ttnn::experimental::prepare_moe_compute_w0_w1 when tt-metal lands it).
+    auto resultType = cast<RankedTensorType>(
+        this->getTypeConverter()->convertType(op.getResult().getType()));
+
+    rewriter.replaceOpWithNewOp<ttnn::PrepareMoEComputeW0W1WeightsOp>(
+        op, resultType, adaptor.getW0(), adaptor.getW1(), adaptor.getBias_0(),
+        adaptor.getBias_1(), device, op.getHiddenSizeAttr(),
+        op.getIntermediateSizeAttr(),
+        /*output_memory_config=*/ttnn::MemoryConfigAttr());
+    return success();
+  }
+};
+
+class PrepareMoEComputeW2WeightsOpConversionPattern
+    : public OpConversionPattern<ttir::PrepareMoEComputeW2WeightsOp> {
+public:
+  using OpConversionPattern<
+      ttir::PrepareMoEComputeW2WeightsOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::PrepareMoEComputeW2WeightsOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto resultType = cast<RankedTensorType>(
+        this->getTypeConverter()->convertType(op.getResult().getType()));
+    auto device = ::ttnn::utils::getOrInsertDevice(rewriter, op);
+
+    rewriter.replaceOpWithNewOp<ttnn::PrepareMoEComputeW2WeightsOp>(
+        op, resultType, adaptor.getW2(), adaptor.getBias_2(), device,
+        op.getHiddenSizeAttr(), op.getIntermediateSizeAttr(),
+        /*output_memory_config=*/ttnn::MemoryConfigAttr());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
+class MoeComputeOpConversionPattern
+    : public OpConversionPattern<ttir::MoeComputeOp> {
+public:
+  using OpConversionPattern<ttir::MoeComputeOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::MoeComputeOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    llvm::SmallVector<Type, 6> resultTypes;
+    resultTypes.reserve(op->getNumResults());
+    for (Value result : op->getResults()) {
+      resultTypes.push_back(
+          this->getTypeConverter()->convertType(result.getType()));
+    }
+
+    auto device = ::ttnn::utils::getOrInsertDevice(rewriter, op);
+
+    // optional_output_tensor and cross_device_semaphore are intentionally left
+    // unbound here. They are materialized in the prelude by
+    // TTNNAllocateDistributedOpBuffers / TTNNAllocateDistributedOpSemaphores
+    // via DistributedOpInterface.
+    rewriter.replaceOpWithNewOp<ttnn::MoeComputeOp>(
+        op, resultTypes, adaptor.getTilizeInputTensor(),
+        adaptor.getTilizeExpertIndicesTensor(),
+        adaptor.getTilizeExpertScoresTensor(),
+        adaptor.getTilizeExpertMappingTensor(), adaptor.getMatmulW0W1Tensor(),
+        adaptor.getMatmulW2Tensor(), /*optional_output_tensor=*/Value(),
+        /*cross_device_semaphore=*/Value(), device, op.getLayerIdAttr(),
+        op.getOutputHeightShardDimAttr(), op.getIntermediateSizeAttr(),
+        op.getHasBiasAttr(), op.getClusterAxisAttr(),
+        op.getActivationFunctionAttr(), op.getNumLinksAttr(),
+        op.getTopologyAttr(),
+        /*mux_core_range_set=*/ttnn::CoreRangeSetAttr(),
+        /*output_memory_config=*/ttnn::MemoryConfigAttr());
+    return success();
+  }
+};
+} // namespace
+
+namespace {
 class Conv2dOpConversionPattern : public OpConversionPattern<ttir::Conv2dOp> {
 public:
   using OpConversionPattern<ttir::Conv2dOp>::OpConversionPattern;
@@ -3705,6 +3798,9 @@ void populateTTIRToTTNNPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
            AllToAllCombineOpConversionPattern,
            SelectiveReduceCombineOpConversionPattern,
            MoeExpertTokenRemapOpConversionPattern,
+           PrepareMoEComputeW0W1WeightsOpConversionPattern,
+           PrepareMoEComputeW2WeightsOpConversionPattern,
+           MoeComputeOpConversionPattern,
            Conv2dOpConversionPattern,
            Conv3dOpConversionPattern,
            ConvTranspose2dOpConversionPattern,

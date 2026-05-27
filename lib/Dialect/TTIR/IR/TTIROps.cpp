@@ -7949,6 +7949,69 @@ mlir::tt::ttir::PagedFlashMultiLatentAttentionDecodeOp::verify() {
 }
 
 //===----------------------------------------------------------------------===//
+// PrepareMoEComputeW0W1WeightsOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult mlir::tt::ttir::PrepareMoEComputeW0W1WeightsOp::verify() {
+  if (getHiddenSize() == 0 || getHiddenSize() % 32 != 0) {
+    return emitOpError("hidden_size must be a positive multiple of 32");
+  }
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  if (static_cast<bool>(getBias_0()) != static_cast<bool>(getBias_1())) {
+    return emitOpError("bias_0 and bias_1 must be both present or both absent");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// PrepareMoEComputeW2WeightsOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult mlir::tt::ttir::PrepareMoEComputeW2WeightsOp::verify() {
+  if (getHiddenSize() == 0 || getHiddenSize() % 32 != 0) {
+    return emitOpError("hidden_size must be a positive multiple of 32");
+  }
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
+// MoeComputeOp
+//===----------------------------------------------------------------------===//
+
+::mlir::LogicalResult mlir::tt::ttir::MoeComputeOp::verify() {
+  if (getIntermediateSize() == 0 || getIntermediateSize() % 32 != 0) {
+    return emitOpError("intermediate_size must be a positive multiple of 32");
+  }
+  if (getOutputHeightShardDim() == 0) {
+    return emitOpError("output_height_shard_dim must be positive");
+  }
+  if (getClusterAxis() > 1) {
+    return emitOpError("cluster_axis must be 0 or 1");
+  }
+
+  ::mlir::RankedTensorType inputType = getTilizeInputTensor().getType();
+  if (inputType.getRank() < 2) {
+    return emitOpError("tilize_input_tensor must have rank >= 2");
+  }
+  int64_t hiddenSize = inputType.getShape().back();
+  if (hiddenSize <= 0 || hiddenSize % 32 != 0) {
+    return emitOpError(
+        "tilize_input_tensor last dim (hidden_size) must be a positive "
+        "multiple of 32");
+  }
+
+  if (getNumResults() != 6) {
+    return emitOpError("moe_compute must have exactly 6 results");
+  }
+  return success();
+}
+
+//===----------------------------------------------------------------------===//
 // AbsOp
 //===----------------------------------------------------------------------===//
 

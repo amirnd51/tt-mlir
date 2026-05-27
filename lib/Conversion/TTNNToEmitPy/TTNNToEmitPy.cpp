@@ -3803,6 +3803,145 @@ public:
 };
 } // namespace
 
+// PrepareMoEComputeW0W1WeightsOp conversion pattern
+//
+namespace {
+class PrepareMoEComputeW0W1WeightsOpConversionPattern
+    : public TTNNToEmitPyBaseOpConversionPattern<
+          mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.prepare_moe_compute_w0_w1_weights";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn.experimental.prepare_moe_compute_w0_w1";
+  }
+
+public:
+  using TTNNToEmitPyBaseOpConversionPattern<
+      mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp>::
+      TTNNToEmitPyBaseOpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp srcOp,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitpy::EmitPyTTNNEmitter<
+        mlir::tt::ttnn::PrepareMoEComputeW0W1WeightsOp>
+        emitter(srcOp, adaptor, rewriter);
+
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getW0(), "w0_tensor"),
+        emitter.emit(srcOp.getW1(), "w1_tensor"),
+        emitter.emit(srcOp.getBias_0(), "bias_0_tensor"),
+        emitter.emit(srcOp.getBias_1(), "bias_1_tensor"),
+        emitter.emit(srcOp.getHiddenSize(), "hidden_size"),
+        emitter.emit(srcOp.getIntermediateSize(), "intermediate_size"),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr(), "memory_config"),
+    };
+
+    emitter.replaceOp(*this, args);
+    return success();
+  }
+};
+} // namespace
+
+// PrepareMoEComputeW2WeightsOp conversion pattern
+//
+namespace {
+class PrepareMoEComputeW2WeightsOpConversionPattern
+    : public TTNNToEmitPyBaseOpConversionPattern<
+          mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.prepare_moe_compute_w2_weights";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn.experimental.prepare_moe_compute_w2";
+  }
+
+public:
+  using TTNNToEmitPyBaseOpConversionPattern<
+      mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp>::
+      TTNNToEmitPyBaseOpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp srcOp,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitpy::EmitPyTTNNEmitter<
+        mlir::tt::ttnn::PrepareMoEComputeW2WeightsOp>
+        emitter(srcOp, adaptor, rewriter);
+
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getW2(), "w2_tensor"),
+        emitter.emit(srcOp.getBias_2(), "bias_2_tensor"),
+        emitter.emit(srcOp.getHiddenSize(), "hidden_size"),
+        emitter.emit(srcOp.getIntermediateSize(), "intermediate_size"),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr(), "memory_config"),
+    };
+
+    emitter.replaceOp(*this, args);
+    return success();
+  }
+};
+} // namespace
+
+// MoeComputeOp conversion pattern
+//
+namespace {
+class MoeComputeOpConversionPattern
+    : public TTNNToEmitPyBaseOpConversionPattern<mlir::tt::ttnn::MoeComputeOp> {
+private:
+  std::string getPrefixSearchPattern() const override {
+    return "ttnn.moe_compute";
+  }
+  std::string getPrefixSwapPattern() const override {
+    return "ttnn.experimental.moe_compute";
+  }
+
+public:
+  using TTNNToEmitPyBaseOpConversionPattern<
+      mlir::tt::ttnn::MoeComputeOp>::TTNNToEmitPyBaseOpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(mlir::tt::ttnn::MoeComputeOp srcOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    ttnn_to_emitpy::EmitPyTTNNEmitter<mlir::tt::ttnn::MoeComputeOp> emitter(
+        srcOp, adaptor, rewriter);
+
+    llvm::SmallVector<mlir::Attribute> args{
+        emitter.emit(srcOp.getTilizeInputTensor(), "tilize_input_tensor"),
+        emitter.emit(srcOp.getTilizeExpertIndicesTensor(),
+                     "tilize_expert_indices_tensor"),
+        emitter.emit(srcOp.getTilizeExpertScoresTensor(),
+                     "tilize_expert_scores_tensor"),
+        emitter.emit(srcOp.getTilizeExpertMappingTensor(),
+                     "tilize_expert_mapping_tensor"),
+        emitter.emit(srcOp.getMatmulW0W1Tensor(), "matmul_w0_w1_tensor"),
+        emitter.emit(srcOp.getMatmulW2Tensor(), "matmul_w2_tensor"),
+        emitter.emit(srcOp.getLayerId(), "layer_id"),
+        emitter.emit(srcOp.getOutputHeightShardDim(),
+                     "output_height_shard_dim"),
+        emitter.emit(srcOp.getIntermediateSize(), "intermediate_size"),
+        emitter.emit(srcOp.getHasBias(), "has_bias"),
+        emitter.emit(srcOp.getClusterAxis(), "cluster_axis"),
+        emitter.emit(srcOp.getActivationFunction(), "activation_type"),
+        emitter.emit(srcOp.getNumLinks(), "num_links"),
+        emitter.emit(srcOp.getTopology(), "topology"),
+        emitter.emit(srcOp.getMuxCoreRangeSetAttr(), "mux_core_range_set"),
+        emitter.emit(srcOp.getOutputMemoryConfigAttr(), "output_memory_config"),
+        emitter.emit(srcOp.getOptionalOutputTensor(), "optional_output_tensor"),
+        emitter.emit(srcOp.getCrossDeviceSemaphore(),
+                     "optional_cross_device_semaphore"),
+    };
+
+    emitter.replaceOp(*this, args);
+    return success();
+  }
+};
+} // namespace
+
 // RMSNormOp conversion pattern
 //
 namespace {
@@ -5238,7 +5377,10 @@ void populateTTNNToEmitPyPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
                AllToAllDispatchOpConversionPattern,
                AllToAllDispatchMetadataOpConversionPattern,
                AllToAllCombineOpConversionPattern,
-               MoeExpertTokenRemapOpConversionPattern
+               MoeExpertTokenRemapOpConversionPattern,
+               PrepareMoEComputeW0W1WeightsOpConversionPattern,
+               PrepareMoEComputeW2WeightsOpConversionPattern,
+               MoeComputeOpConversionPattern
               >(typeConverter, ctx);
   // clang-format on
 

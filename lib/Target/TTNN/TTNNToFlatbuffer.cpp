@@ -1263,6 +1263,135 @@ createOp(FlatbufferObjectCache &cache, MoeExpertTokenRemapOp op) {
       static_cast<uint32_t>(op.getReductionSize()), memoryConfig);
 }
 
+::flatbuffers::Offset<::tt::target::ttnn::PrepareMoEComputeW0W1WeightsOp>
+createOp(FlatbufferObjectCache &cache, PrepareMoEComputeW0W1WeightsOp op) {
+  auto w0 = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getW0()));
+  auto w1 = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getW1()));
+  ::flatbuffers::Offset<::tt::target::ttnn::TensorRef> bias0 = 0;
+  if (op.getBias_0()) {
+    bias0 = cache.at<::tt::target::ttnn::TensorRef>(
+        getOperandThroughDPSOps(op.getBias_0()));
+  }
+  ::flatbuffers::Offset<::tt::target::ttnn::TensorRef> bias1 = 0;
+  if (op.getBias_1()) {
+    bias1 = cache.at<::tt::target::ttnn::TensorRef>(
+        getOperandThroughDPSOps(op.getBias_1()));
+  }
+  auto device = getOperandThroughDPSOps(op.getDevice());
+  auto deviceRef = cache.at<::tt::target::DeviceRef>(device);
+  auto out = cache.getOrCreateNoSharding(op.getResult(),
+                                         tensorValueToFlatbuffer, std::nullopt);
+
+  ::flatbuffers::Offset<::tt::target::ttnn::MemoryConfig> outputMemoryConfig =
+      0;
+  if (op.getOutputMemoryConfigAttr()) {
+    outputMemoryConfig = toFlatbuffer(cache, op.getOutputMemoryConfigAttr());
+  }
+
+  return ::tt::target::ttnn::CreatePrepareMoEComputeW0W1WeightsOp(
+      *cache.fbb, w0, w1, bias0, bias1, deviceRef, op.getHiddenSize(),
+      op.getIntermediateSize(), outputMemoryConfig, out);
+}
+
+::flatbuffers::Offset<::tt::target::ttnn::PrepareMoEComputeW2WeightsOp>
+createOp(FlatbufferObjectCache &cache, PrepareMoEComputeW2WeightsOp op) {
+  auto w2 = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getW2()));
+  ::flatbuffers::Offset<::tt::target::ttnn::TensorRef> bias2 = 0;
+  if (op.getBias_2()) {
+    bias2 = cache.at<::tt::target::ttnn::TensorRef>(
+        getOperandThroughDPSOps(op.getBias_2()));
+  }
+  auto device = getOperandThroughDPSOps(op.getDevice());
+  auto deviceRef = cache.at<::tt::target::DeviceRef>(device);
+  auto out = cache.getOrCreateNoSharding(op.getResult(),
+                                         tensorValueToFlatbuffer, std::nullopt);
+
+  ::flatbuffers::Offset<::tt::target::ttnn::MemoryConfig> outputMemoryConfig =
+      0;
+  if (op.getOutputMemoryConfigAttr()) {
+    outputMemoryConfig = toFlatbuffer(cache, op.getOutputMemoryConfigAttr());
+  }
+
+  return ::tt::target::ttnn::CreatePrepareMoEComputeW2WeightsOp(
+      *cache.fbb, w2, bias2, deviceRef, op.getHiddenSize(),
+      op.getIntermediateSize(), outputMemoryConfig, out);
+}
+
+::flatbuffers::Offset<::tt::target::ttnn::MoeComputeOp>
+createOp(FlatbufferObjectCache &cache, MoeComputeOp op) {
+  auto tilizeInput = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getTilizeInputTensor()));
+  auto tilizeIndices = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getTilizeExpertIndicesTensor()));
+  auto tilizeScores = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getTilizeExpertScoresTensor()));
+  auto tilizeMapping = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getTilizeExpertMappingTensor()));
+  auto w0w1 = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getMatmulW0W1Tensor()));
+  auto w2 = cache.at<::tt::target::ttnn::TensorRef>(
+      getOperandThroughDPSOps(op.getMatmulW2Tensor()));
+
+  ::flatbuffers::Offset<::tt::target::ttnn::TensorRef> optionalOutput = 0;
+  if (op.getOptionalOutputTensor()) {
+    optionalOutput = cache.at<::tt::target::ttnn::TensorRef>(
+        getOperandThroughDPSOps(op.getOptionalOutputTensor()));
+  }
+
+  ::flatbuffers::Offset<::tt::target::ttnn::GlobalSemaphoreRef>
+      crossDeviceSemaphore = 0;
+  if (op.getCrossDeviceSemaphore()) {
+    crossDeviceSemaphore = cache.at<::tt::target::ttnn::GlobalSemaphoreRef>(
+        op.getCrossDeviceSemaphore());
+  }
+
+  auto device = getOperandThroughDPSOps(op.getDevice());
+  auto deviceRef = cache.at<::tt::target::DeviceRef>(device);
+
+  auto activation = toFlatbuffer(cache, op.getActivationFunction());
+
+  ::tt::target::Topology topology = ::tt::target::Topology::Ring;
+  bool hasTopology = op.getTopology().has_value();
+  if (hasTopology) {
+    topology = toFlatbuffer(cache, op.getTopology().value());
+  }
+
+  ::flatbuffers::Offset<::tt::target::ttnn::CoreRangeSet> muxCoreRangeSet = 0;
+  if (op.getMuxCoreRangeSetAttr()) {
+    muxCoreRangeSet = toFlatbuffer(cache, op.getMuxCoreRangeSetAttr());
+  }
+
+  ::flatbuffers::Offset<::tt::target::ttnn::MemoryConfig> outputMemoryConfig =
+      0;
+  if (op.getOutputMemoryConfigAttr()) {
+    outputMemoryConfig = toFlatbuffer(cache, op.getOutputMemoryConfigAttr());
+  }
+
+  auto perExpertTokens = cache.getOrCreateNoSharding(
+      op.getPerExpertTotalTokens(), tensorValueToFlatbuffer, std::nullopt);
+  auto expertActivation = cache.getOrCreateNoSharding(
+      op.getExpertActivation(), tensorValueToFlatbuffer, std::nullopt);
+  auto expertToToken = cache.getOrCreateNoSharding(
+      op.getExpertToToken(), tensorValueToFlatbuffer, std::nullopt);
+  auto tilizeOutput = cache.getOrCreateNoSharding(
+      op.getTilizeOutput(), tensorValueToFlatbuffer, std::nullopt);
+  auto matmulOutput = cache.getOrCreateNoSharding(
+      op.getMatmulOutput(), tensorValueToFlatbuffer, std::nullopt);
+  auto combineOutput = cache.getOrCreateNoSharding(
+      op.getCombineOutput(), tensorValueToFlatbuffer, std::nullopt);
+
+  return ::tt::target::ttnn::CreateMoeComputeOp(
+      *cache.fbb, tilizeInput, tilizeIndices, tilizeScores, tilizeMapping, w0w1,
+      w2, optionalOutput, crossDeviceSemaphore, deviceRef, op.getLayerId(),
+      op.getOutputHeightShardDim(), op.getIntermediateSize(), op.getHasBias(),
+      op.getClusterAxis(), activation, op.getNumLinks().value_or(0), topology,
+      muxCoreRangeSet, outputMemoryConfig, perExpertTokens, expertActivation,
+      expertToToken, tilizeOutput, matmulOutput, combineOutput);
+}
+
 // Convert ttcore::ReduceType to tt::target::ttnn::ScatterReduceType
 // Sum, Max, Min, Prod - applied reduction type to source tensor
 // Invalid - copy source to output tensor
@@ -4450,6 +4579,18 @@ emitTTNNOperation(FlatbufferObjectCache &cache, Operation *op,
       moeExpertTokenRemapOp) {
     return createOperation(cache, createOp(cache, moeExpertTokenRemapOp),
                            debugString, locInfo);
+  }
+  if (auto prepW0W1 = dyn_cast<PrepareMoEComputeW0W1WeightsOp>(op); prepW0W1) {
+    return createOperation(cache, createOp(cache, prepW0W1), debugString,
+                           locInfo);
+  }
+  if (auto prepW2 = dyn_cast<PrepareMoEComputeW2WeightsOp>(op); prepW2) {
+    return createOperation(cache, createOp(cache, prepW2), debugString,
+                           locInfo);
+  }
+  if (auto moeComputeOp = dyn_cast<MoeComputeOp>(op); moeComputeOp) {
+    return createOperation(cache, createOp(cache, moeComputeOp), debugString,
+                           locInfo);
   }
   if (auto scatterOp = dyn_cast<ScatterOp>(op); scatterOp) {
     return createOperation(cache, createOp(cache, scatterOp), debugString,

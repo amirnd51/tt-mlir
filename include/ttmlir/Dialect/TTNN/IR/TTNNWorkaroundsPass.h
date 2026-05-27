@@ -24,6 +24,7 @@ class RotaryEmbeddingOp;
 class Conv3dOp;
 class TopKOp;
 class TopKRouterGptOp;
+class MoeComputeOp;
 } // namespace mlir::tt::ttnn
 
 namespace mlir::tt::ttnn::wa {
@@ -399,6 +400,14 @@ public:
   // Issue page: https://github.com/tenstorrent/tt-metal/issues/39128
   static TTNNOperandsWorkarounds
   createMoeExpertTokenRemapOpOperandsWorkarounds();
+
+  // Create workarounds for moe_compute op operands.
+  // Inputs are bfloat16 / uint16 ROW_MAJOR; outputs are a mix of uint32 and
+  // bfloat16 in ROW_MAJOR and TILE layouts. Memory-config (sharded vs
+  // interleaved) coercion is handled by MoeComputeRewritePattern, not this
+  // factory.
+  static TTNNOperandsWorkarounds
+  createMoeComputeOpOperandsWorkarounds(ttnn::MoeComputeOp op);
 
   // Create workarounds for topk ops.
   // Input must be BFloat16 or BFP_BFloat8.

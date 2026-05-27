@@ -6529,4 +6529,114 @@ def TTIR_MoeExpertTokenRemapOp : TTIR_NamedOp<"moe_expert_token_remap"> {
     let hasVerifier = 1;
 }
 
+def TTIR_PrepareMoEComputeW0W1WeightsOp :
+    TTIR_NamedOp<"prepare_moe_compute_w0_w1_weights", [AttrSizedOperandSegments]> {
+    let summary = "Prepack gate (W0) and up (W1) expert weights for moe_compute.";
+    let description = [{
+      Interleaves the gate (W0) and up (W1) projection weights and reorders the
+      result into the bank-aware sharded layout `ttir.moe_compute`'s
+      `matmul_w0_w1_tensor` operand consumes. Optional `bias_0` / `bias_1` fuse
+      per-expert biases along K (their presence must match `has_bias` on the
+      downstream `moe_compute`).
+
+      Input logical shapes are `(L, E, K, N)` where `K = hidden_size` and
+      `N = intermediate_size`. Output is a 6-D packed tensor of shape
+      `(num_cores, L, E, groups_per_core, K_padded, 4*TILE_SIZE)`; the exact
+      values come from the runtime / OpModel shape query.
+    }];
+
+    let arguments = (ins AnyRankedTensor:$w0,
+                         AnyRankedTensor:$w1,
+                         Optional<AnyRankedTensor>:$bias_0,
+                         Optional<AnyRankedTensor>:$bias_1,
+                         UI32Attr:$hidden_size,
+                         UI32Attr:$intermediate_size);
+
+    let results = (outs AnyRankedTensor:$result);
+
+    let hasVerifier = 1;
+}
+
+def TTIR_PrepareMoEComputeW2WeightsOp :
+    TTIR_NamedOp<"prepare_moe_compute_w2_weights"> {
+    let summary = "Prepack down (W2) expert weight for moe_compute.";
+    let description = [{
+      Reorders the down (W2) projection weight into the bank-aware sharded
+      layout `ttir.moe_compute`'s `matmul_w2_tensor` operand consumes. Optional
+      `bias_2` fuses the per-expert bias along N without ring-rotation (its
+      presence must match `has_bias` on the downstream `moe_compute`).
+
+      Input logical shape is `(L, E, N, K)` where `N = intermediate_size` and
+      `K = hidden_size`. Output is a 6-D packed tensor; exact shape comes from
+      the runtime / OpModel shape query.
+    }];
+
+    let arguments = (ins AnyRankedTensor:$w2,
+                         Optional<AnyRankedTensor>:$bias_2,
+                         UI32Attr:$hidden_size,
+                         UI32Attr:$intermediate_size);
+
+    let results = (outs AnyRankedTensor:$result);
+
+    let hasVerifier = 1;
+}
+
+def TTIR_MoeComputeOp : TTIR_NamedOp<"moe_compute", [TTIR_CCL]> {
+    let summary = "Fused MoE expert compute (selective tilize + experts + combine).";
+    let description = [{
+      Composite operation that performs the MoE expert FFN in a single fused
+      kernel: selective tilize of dispatched tokens, the gate/up matmul (W0/W1)
+      followed by SILU or SwiGLU activation, the down matmul (W2), and an
+      A2A selective-reduce-combine. Maps to
+      `ttnn.experimental.moe_compute` at runtime.
+
+      Inputs:
+      - `tilize_input_tensor`: dense per-token activations dispatched via
+        all_to_all_dispatch. Row-major bfloat16.
+      - `tilize_expert_indices_tensor`: per-token expert indices. uint16.
+      - `tilize_expert_scores_tensor`: per-token expert routing scores.
+        bfloat16.
+      - `tilize_expert_mapping_tensor`: global expert-to-device mapping.
+        uint16.
+      - `matmul_w0_w1_tensor`: packed W0/W1 weights produced by
+        `prepare_moe_compute_weights` with `which=w0_w1`.
+      - `matmul_w2_tensor`: packed W2 weights produced by
+        `prepare_moe_compute_weights` with `which=w2`.
+
+      Outputs (6, in declaration order):
+        0. `per_expert_total_tokens`     : uint32, row-major, height-sharded
+        1. `expert_activation`           : uint32, row-major, interleaved
+        2. `expert_to_token`             : uint32, row-major, interleaved
+        3. `tilize_output`               : bf16,  tile,      height-sharded
+        4. `matmul_output`               : bf16,  row-major, height-sharded
+           (aliases `tilize_output` storage)
+        5. `combine_output`              : bf16,  row-major
+    }];
+
+    let arguments = (ins AnyRankedTensor:$tilize_input_tensor,
+                         AnyRankedTensor:$tilize_expert_indices_tensor,
+                         AnyRankedTensor:$tilize_expert_scores_tensor,
+                         AnyRankedTensor:$tilize_expert_mapping_tensor,
+                         AnyRankedTensor:$matmul_w0_w1_tensor,
+                         AnyRankedTensor:$matmul_w2_tensor,
+                         UI32Attr:$layer_id,
+                         UI32Attr:$output_height_shard_dim,
+                         UI32Attr:$intermediate_size,
+                         BoolAttr:$has_bias,
+                         UI32Attr:$cluster_axis,
+                         DefaultValuedAttr<TTCore_MoEActivationFunctionAttr,
+                             "::mlir::tt::ttcore::MoEActivationFunction::Silu">:$activation_function,
+                         OptionalAttr<UI32Attr>:$num_links,
+                         OptionalAttr<TTCore_TopologyAttr>:$topology);
+
+    let results = (outs AnyRankedTensor:$per_expert_total_tokens,
+                        AnyRankedTensor:$expert_activation,
+                        AnyRankedTensor:$expert_to_token,
+                        AnyRankedTensor:$tilize_output,
+                        AnyRankedTensor:$matmul_output,
+                        AnyRankedTensor:$combine_output);
+
+    let hasVerifier = 1;
+}
+
 #endif

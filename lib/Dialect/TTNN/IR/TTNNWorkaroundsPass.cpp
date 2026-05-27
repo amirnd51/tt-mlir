@@ -1375,6 +1375,67 @@ TTNNOperandsWorkarounds TTNNOperandsWorkaroundsFactory::
       .addOutputOperandWorkaround(rowMajorUint16Workaround); // reduced
 }
 
+// tt-metal moe_compute device-op validate_on_program_cache_miss requirements:
+//   tilize_input_tensor:           ROW_MAJOR, BFLOAT16
+//   tilize_expert_indices_tensor:  ROW_MAJOR, UINT16
+//   tilize_expert_scores_tensor:   ROW_MAJOR, BFLOAT16
+//   tilize_expert_mapping_tensor:  ROW_MAJOR, UINT16
+//   matmul_w0_w1_tensor:           pre-packed by prepare_moe_compute_weights;
+//                                  no dtype/layout workaround applied here.
+//   matmul_w2_tensor:              same as W0/W1.
+// Outputs (in declaration order):
+//   per_expert_total_tokens:       UINT32, ROW_MAJOR
+//   expert_activation:             UINT32, ROW_MAJOR
+//   expert_to_token:               UINT32, ROW_MAJOR
+//   tilize_output:                 BFLOAT16, TILE
+//   matmul_output:                 BFLOAT16, ROW_MAJOR (aliases tilize_output)
+//   combine_output:                BFLOAT16, ROW_MAJOR
+// Memory-config (sharded vs interleaved) coercion is intentionally not
+// expressed here; the dedicated MoeComputeRewritePattern handles it.
+TTNNOperandsWorkarounds
+TTNNOperandsWorkaroundsFactory::createMoeComputeOpOperandsWorkarounds(
+    ttnn::MoeComputeOp op) {
+  TTNNOperandWorkarounds rmBf16;
+  rmBf16.tensorLayoutWorkaround = Layout::RowMajor;
+  rmBf16.tensorDataTypeWorkaround = ttcore::DataType::BFloat16;
+
+  TTNNOperandWorkarounds rmU16;
+  rmU16.tensorLayoutWorkaround = Layout::RowMajor;
+  rmU16.tensorDataTypeWorkaround = ttcore::DataType::UInt16;
+
+  TTNNOperandWorkarounds rmU32;
+  rmU32.tensorLayoutWorkaround = Layout::RowMajor;
+  rmU32.tensorDataTypeWorkaround = ttcore::DataType::UInt32;
+
+  TTNNOperandWorkarounds tileBf16;
+  tileBf16.tensorLayoutWorkaround = Layout::Tile;
+  tileBf16.tensorDataTypeWorkaround = ttcore::DataType::BFloat16;
+
+  TTNNOperandWorkarounds none;
+
+  TTNNOperandsWorkarounds w =
+      TTNNOperandsWorkarounds::createEmptyTTNNOperandsWorkarounds()
+          .addInputOperandWorkaround(rmBf16) // tilize_input_tensor
+          .addInputOperandWorkaround(rmU16)  // tilize_expert_indices_tensor
+          .addInputOperandWorkaround(rmBf16) // tilize_expert_scores_tensor
+          .addInputOperandWorkaround(rmU16)  // tilize_expert_mapping_tensor
+          .addInputOperandWorkaround(none)   // matmul_w0_w1_tensor
+          .addInputOperandWorkaround(none);  // matmul_w2_tensor
+  // optional_output_tensor is bound by TTNNAllocateDistributedOpBuffers; the
+  // workaround list must stay in sync with the live operand count so we only
+  // describe it once the buffer is present.
+  if (op.getOptionalOutputTensor()) {
+    w = w.addInputOperandWorkaround(rmBf16); // optional_output_tensor
+  }
+  return w
+      .addOutputOperandWorkaround(rmU32)    // per_expert_total_tokens
+      .addOutputOperandWorkaround(rmU32)    // expert_activation
+      .addOutputOperandWorkaround(rmU32)    // expert_to_token
+      .addOutputOperandWorkaround(tileBf16) // tilize_output
+      .addOutputOperandWorkaround(rmBf16)   // matmul_output
+      .addOutputOperandWorkaround(rmBf16);  // combine_output
+}
+
 // Factory method to create a set of workarounds for topk op.
 // This operation returns two outputs:
 //   [0] values (same data type as input)

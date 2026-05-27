@@ -841,6 +841,36 @@ struct EmitCTypeConverter<::mlir::tt::ttcore::Topology> {
 };
 
 template <>
+struct EmitCTypeConverter<::mlir::tt::ttcore::MoEActivationFunction> {
+  static std::optional<std::string> convert(mlir::Attribute attr) {
+    if (auto fnAttr = mlir::dyn_cast_if_present<
+            mlir::tt::ttcore::MoEActivationFunctionAttr>(attr)) {
+      return convert(fnAttr);
+    }
+    return {};
+  }
+
+  static std::string convert(mlir::tt::ttcore::MoEActivationFunctionAttr attr) {
+    return convert(attr.getValue());
+  }
+
+  static std::string convert(mlir::tt::ttcore::MoEActivationFunction attr) {
+    std::string buf;
+    llvm::raw_string_ostream rso(buf);
+    rso << "ttnn::experimental::prim::detail::MoEActivationFunction::";
+    switch (attr) {
+    case mlir::tt::ttcore::MoEActivationFunction::Silu:
+      rso << "SILU";
+      return buf;
+    case mlir::tt::ttcore::MoEActivationFunction::SwiGLU:
+      rso << "SWIGLU";
+      return buf;
+    }
+    llvm_unreachable("Unknown mlir::tt::ttcore::MoEActivationFunction");
+  }
+};
+
+template <>
 struct EmitCTypeConverter<::ttnn::Shape> {
   static std::optional<std::string> convert(mlir::Attribute attr) {
     if (auto shapeAttr = mlir::dyn_cast_if_present<ttnn::ShapeAttr>(attr)) {
