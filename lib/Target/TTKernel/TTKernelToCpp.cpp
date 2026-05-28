@@ -181,6 +181,11 @@ public:
         headers.insert("api/dataflow/noc.h");
       }
 
+      if (value.contains("get_aligned_page_size") &&
+          value.contains("noc.async_")) {
+        headers.insert("api/tensor/noc_traits.h");
+      }
+
       // Some callees are embedded in VerbatimOps.
       for (const auto &[callee, reqs] : headerMap) {
         if (value.starts_with(callee)) {

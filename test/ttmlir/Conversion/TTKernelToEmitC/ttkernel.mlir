@@ -1917,29 +1917,41 @@ module {
 
     // CHECK-LABEL: func @noc_async_read_one_packet_set_state
     func.func @noc_async_read_one_packet_set_state() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
-      // CHECK: %[[SRC_ADDR:.*]] = emitc.call_opaque "get_noc_addr"
+      // CHECK: emitc.verbatim "UnicastEndpoint unicast_ep;"
+      // CHECK: emitc.verbatim "Noc noc;"
+      // CHECK-DAG: %[[X:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[Y:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[SRC_ADDR:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[SIZE:.*]] = "emitc.constant"
       %x = arith.constant 1 : index
       %y = arith.constant 1 : index
-      %temp = arith.constant 262400 : i32
-      %src_addr = "ttkernel.get_noc_addr"(%x, %y, %temp) : (index, index, i32) -> (!ttkernel.noc_addr)
-      // CHECK: %[[SIZE:.*]] = "emitc.constant"
+      %src_addr = arith.constant 262400 : i32
       %size = arith.constant 2048 : i32
-      // CHECK: emitc.call_opaque "noc_async_read_one_packet_set_state"(%[[SRC_ADDR]], %[[SIZE]])
-      "ttkernel.noc_async_read_one_packet_set_state"(%src_addr, %size) : (!ttkernel.noc_addr, i32) -> ()
+      // CHECK: emitc.verbatim "noc.set_async_read_state<Noc::VcSelection::DEFAULT, NOC_MAX_BURST_SIZE>
+      // CHECK-SAME: .noc_x = {}, .noc_y = {}, .addr = static_cast<uint32_t>
+      // CHECK-SAME: args %[[SIZE]], %[[X]], %[[Y]], %[[SRC_ADDR]]
+      ttkernel.noc_async_read_one_packet_set_state(core[%x, %y], %src_addr, %size) : (index, index, i32, i32) -> ()
       return
     }
 
     // CHECK-LABEL: func @noc_async_read_one_packet_with_state
     func.func @noc_async_read_one_packet_with_state() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
-      // CHECK: %[[SRC_ADDR:.*]] = emitc.call_opaque "get_noc_addr"
+      // CHECK: emitc.verbatim "UnicastEndpoint unicast_ep;"
+      // CHECK: emitc.verbatim "Noc noc;"
+      // CHECK-DAG: %[[X:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[Y:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[SRC_ADDR:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[DST_ADDR:.*]] = "emitc.constant"
+      // CHECK-DAG: %[[SIZE:.*]] = "emitc.constant"
       %x = arith.constant 1 : index
       %y = arith.constant 1 : index
-      %temp = arith.constant 262400 : i32
-      %src_addr = "ttkernel.get_noc_addr"(%x, %y, %temp) : (index, index, i32) -> (!ttkernel.noc_addr)
-      // CHECK: %[[DST_ADDR:.*]] = "emitc.constant"
+      %src_addr = arith.constant 262400 : i32
       %dst_addr = arith.constant 327680 : i32
-      // CHECK: emitc.call_opaque "noc_async_read_one_packet_with_state"(%[[SRC_ADDR]], %[[DST_ADDR]])
-      "ttkernel.noc_async_read_one_packet_with_state"(%src_addr, %dst_addr) : (!ttkernel.noc_addr, i32) -> ()
+      %size = arith.constant 2048 : i32
+      // CHECK: emitc.verbatim "noc.async_read_with_state<Noc::VcSelection::DEFAULT, NOC_MAX_BURST_SIZE>
+      // CHECK-SAME: .noc_x = {}, .noc_y = {}, .addr = static_cast<uint32_t>
+      // CHECK-SAME: args %[[DST_ADDR]], %[[SIZE]], %[[X]], %[[Y]], %[[SRC_ADDR]]
+      ttkernel.noc_async_read_one_packet_with_state(core[%x, %y], %src_addr, %dst_addr, %size) : (index, index, i32, i32, i32) -> ()
       // TODO: test %dst_addr of type TTKernel_L1Addr?
       return
     }
@@ -1983,7 +1995,7 @@ module {
       // CHECK-NOT: get_noc_multicast_addr
       // CHECK-NOT: noc_async_write_multicast
       // CHECK: emitc.verbatim "MulticastEndpoint mcast_ep;"
-      // CHECK: emitc.verbatim "Noc noc(1);"
+      // CHECK: emitc.verbatim "Noc noc1(1);"
       // CHECK: %[[XS:.*]] = "emitc.constant"() <{value = 0 : index}>
       // CHECK: %[[YS:.*]] = "emitc.constant"() <{value = 1 : index}>
       // CHECK: %[[XE:.*]] = "emitc.constant"() <{value = 2 : index}>
@@ -1993,11 +2005,11 @@ module {
       // CHECK: %[[SIZE:.*]] = "emitc.constant"() <{value = 64 : i32}>
       // CHECK: %[[NUM_DESTS:.*]] = "emitc.constant"() <{value = 4 : i32}>
       // CHECK: %[[NOC:.*]] = "emitc.constant"() <{value = 1 : i8}>
-      // CHECK: emitc.verbatim "noc.async_write_multicast<Noc::McastMode::EXCLUDE_SRC>
+      // CHECK: emitc.verbatim "noc1.async_write_multicast<Noc::McastMode::EXCLUDE_SRC>
       // CHECK-SAME: noc_traits_t<MulticastEndpoint>::dst_args_mcast_type
       // CHECK-SAME: args %[[SRC]], %[[SIZE]], %[[NUM_DESTS]], %[[XE]], %[[YE]], %[[XS]], %[[YS]], %[[ADDR]]
       ttkernel.noc_async_write_multicast(%src, %size, %num_dests, start_xy[%xe, %ye], end_xy[%xs, %ys], %addr, %noc) : (i32, i32, i32, index, index, index, index, i32, i8) -> ()
-      // CHECK: emitc.verbatim "noc.async_write_multicast<Noc::McastMode::INCLUDE_SRC>
+      // CHECK: emitc.verbatim "noc1.async_write_multicast<Noc::McastMode::INCLUDE_SRC>
       // CHECK-SAME: noc_traits_t<MulticastEndpoint>::dst_args_mcast_type
       // CHECK-SAME: args %[[SRC]], %[[SIZE]], %[[NUM_DESTS]], %[[XE]], %[[YE]], %[[XS]], %[[YS]], %[[ADDR]]
       ttkernel.noc_async_write_multicast_loopback_src(%src, %size, %num_dests, start_xy[%xe, %ye], end_xy[%xs, %ys], %addr, %noc) : (i32, i32, i32, index, index, index, index, i32, i8) -> ()
@@ -2163,10 +2175,10 @@ module {
 
     // CHECK-LABEL: func @noc_async_atomic_barrier_with_noc_id
     func.func @noc_async_atomic_barrier_with_noc_id() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
-      // CHECK: emitc.verbatim "Noc noc(1);"
+      // CHECK: emitc.verbatim "Noc noc1(1);"
       // CHECK: %[[NOC_ID:.*]] = "emitc.constant"
       %noc_id = arith.constant 1 : i8
-      // CHECK: emitc.verbatim "noc.async_atomic_barrier<Noc::BarrierMode::FULL>();"
+      // CHECK: emitc.verbatim "noc1.async_atomic_barrier<Noc::BarrierMode::FULL>();"
       ttkernel.noc_async_atomic_barrier(%noc_id) : (i8) -> ()
       return
     }
@@ -2240,22 +2252,24 @@ module {
 
     // CHECK-LABEL: func @noc_inline_dw_write
     func.func @noc_inline_dw_write() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
+      // CHECK: emitc.verbatim "UnicastEndpoint unicast_ep;"
+      // CHECK: emitc.verbatim "Noc noc1(1);"
       // CHECK-DAG: %[[NOC_X:.*]] = "emitc.constant"() <{value = 1 : index}> : () -> !emitc.size_t
       // CHECK-DAG: %[[NOC_Y:.*]] = "emitc.constant"() <{value = 1 : index}> : () -> !emitc.size_t
       // CHECK-DAG: %[[DST_ADDR:.*]] = "emitc.constant"() <{value = 262400 : i32}> : () -> i32
       %noc_x = arith.constant 1 : index
       %noc_y = arith.constant 1 : index
       %dst_addr = arith.constant 262400 : i32
-      // CHECK: %[[DST_NOC_ADDR:.*]] = emitc.call_opaque "get_noc_addr"(%[[NOC_X]], %[[NOC_Y]], %[[DST_ADDR]])
-      %dst_noc_addr = "ttkernel.get_noc_addr"(%noc_x, %noc_y, %dst_addr) : (index, index, i32) -> !ttkernel.noc_addr
       // CHECK-DAG: %[[VAL:.*]] = "emitc.constant"() <{value = 7 : i32}> : () -> i32
       // CHECK-DAG: %[[BE:.*]] = "emitc.constant"() <{value = 15 : i8}> : () -> i8
       // CHECK-DAG: %[[NOC:.*]] = "emitc.constant"() <{value = 1 : i8}> : () -> i8
       %val = arith.constant 7 : i32
       %be = arith.constant 15 : i8
       %noc = arith.constant 1 : i8
-      // CHECK: emitc.call_opaque "noc_inline_dw_write"(%[[DST_NOC_ADDR]], %[[VAL]], %[[BE]], %[[NOC]]) {template_args = [#emitc.opaque<"InlineWriteDst::L1">]}
-      ttkernel.noc_inline_dw_write(%dst_noc_addr, %val, %be, %noc) : (!ttkernel.noc_addr, i32, i8, i8) -> ()
+      // CHECK: emitc.verbatim "noc1.inline_dw_write<Noc::TxnIdMode::DISABLED, InlineWriteDst::L1, Noc::ResponseMode::NON_POSTED>
+      // CHECK-SAME: .noc_x = {}, .noc_y = {}, .addr = static_cast<uint32_t>
+      // CHECK-SAME: args %[[VAL]], %[[NOC_X]], %[[NOC_Y]], %[[DST_ADDR]], %[[BE]]
+      ttkernel.noc_inline_dw_write(core[%noc_x, %noc_y], %dst_addr, %val, %be, %noc) : (index, index, i32, i32, i8, i8) -> ()
       return
     }
 
@@ -2338,36 +2352,6 @@ module {
       return
     }
 
-    // CHECK-LABEL: func @interleaved_addr_gen_fast_funcs
-    func.func @interleaved_addr_gen_fast_funcs() -> () attributes {ttkernel.arg_spec = #ttkernel.arg_spec< ct_args = [<arg_type = cb_port, operand_index = 0>]>, ttkernel.thread = #ttkernel.thread<noc>} {
-      // CHECK: %[[CB:.*]] = emitc.literal "get_compile_time_arg_val(0)"
-      %cb = "ttkernel.get_compile_time_arg_val"() <{arg_index = 0 : i32}> : () -> !cb0_tiles
-      // CHECK: %[[DATA_FORMAT:.*]]= emitc.call_opaque "get_dataformat"
-      %data_format = "ttkernel.get_dataformat"(%cb) : (!cb0_tiles) -> !ttkernel.DataFormat
-      // CHECK: = "emitc.constant"() <{value = true}>
-      // CHECK: %[[TEMP_ADDR:.*]] = "emitc.constant"()
-      // CHECK: %[[TILE_SIZE:.*]] = "emitc.constant"()
-      // CHECK: %[[TILE:.*]] = "emitc.constant"()
-      %is_dram = arith.constant 1 : i1
-      %temp_addr = arith.constant 262400 : i32
-      %tile_size = arith.constant 8 : i32
-      %tile = arith.constant 1 : i32
-      // CHECK: %[[VAR:.*]] = "emitc.variable"() <{value = #emitc.opaque<"">}> : () -> !emitc.lvalue<!emitc.opaque<"InterleavedAddrGenFast<true>">>
-      // CHECK: "emitc.member"(%[[VAR]]) <{member = "bank_base_address"}>
-      // CHECK: "emitc.member"(%[[VAR]]) <{member = "page_size"}>
-      // CHECK: "emitc.member"(%[[VAR]]) <{member = "data_format"}>
-      // CHECK: emitc.assign %[[TEMP_ADDR]]
-      // CHECK: emitc.assign %[[TILE_SIZE]]
-      // CHECK: emitc.assign %[[DATA_FORMAT]]
-      // CHECK: %[[ADDR_GEN:.*]] = emitc.load %[[VAR]] : <!emitc.opaque<"InterleavedAddrGenFast<true>">>
-      %s = "ttkernel.get_interleaved_addr_gen_fast"(%is_dram, %temp_addr, %tile_size, %data_format) : (i1, i32, i32, !ttkernel.DataFormat) -> !ttkernel.interleaved_addr_gen_fast
-      // CHECK: emitc.call_opaque "noc_async_write_tile"(%[[TILE]], %[[ADDR_GEN]], %[[TEMP_ADDR]])
-      "ttkernel.noc_async_write_tile"(%tile, %s, %temp_addr) : (i32, !ttkernel.interleaved_addr_gen_fast, i32) -> ()
-      // CHECK: emitc.call_opaque "noc_async_read_tile"(%[[TILE]], %[[ADDR_GEN]], %[[TEMP_ADDR]])
-      "ttkernel.noc_async_read_tile"(%tile, %s, %temp_addr) : (i32, !ttkernel.interleaved_addr_gen_fast, i32) -> ()
-      return
-    }
-
     // CHECK-LABEL: func @tensor_accessor
     func.func @tensor_accessor() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
       // CHECK: "emitc.constant"() <{value = [[CTA_OFFSET:.*]] : i32}>
@@ -2385,6 +2369,16 @@ module {
       %tensor_accessor = "ttkernel.TensorAccessor"(%tensor_accessor_args, %bank_address, %page_size) : (!ttkernel.TensorAccessorArgs, i32, i32) -> !ttkernel.TensorAccessor
       %temp1 = arith.constant 0 : i32
       %temp2 = arith.constant 32: i32
+      // CHECK: emitc.verbatim "noc.async_read
+      // CHECK-SAME: get_aligned_page_size()
+      // CHECK-SAME: .page_id = static_cast<uint32_t>
+      // CHECK-SAME: args %[[TENSOR_ACCESSOR]], {{.*}}, %[[TENSOR_ACCESSOR]]
+      ttkernel.noc_async_read_tile(%temp1, %tensor_accessor, %temp2) : (i32, !ttkernel.TensorAccessor, i32) -> ()
+      // CHECK: emitc.verbatim "noc.async_write
+      // CHECK-SAME: get_aligned_page_size()
+      // CHECK-SAME: .page_id = static_cast<uint32_t>
+      // CHECK-SAME: args {{.*}}, %[[TENSOR_ACCESSOR]], %[[TENSOR_ACCESSOR]]
+      ttkernel.noc_async_write_tile(%temp1, %tensor_accessor, %temp2) : (i32, !ttkernel.TensorAccessor, i32) -> ()
       // CHECK: emitc.verbatim "uint64_t [[NOC_ADDR:.*]] = {}.get_noc_addr({}, {});" args %[[TENSOR_ACCESSOR]], {{.*}} : !emitc.opaque<"TensorAccessor">, i32, i32
       // CHECK: emitc.literal "[[NOC_ADDR]]" : i64
       %noc_addr = "ttkernel.tensor_accessor.get_noc_addr"(%tensor_accessor, %temp1, %temp2) : (!ttkernel.TensorAccessor, i32, i32) -> !ttkernel.noc_addr
@@ -2613,25 +2607,6 @@ module {
       // CHECK: %[[TA:.*]] = emitc.call_opaque "TensorAccessor"(%[[OVERRIDE_LIT]], %[[BANK_ADDR]], %[[PAGE_SIZE]]) : (!emitc.opaque<"TensorAccessorArgs">, i32, i32) -> !emitc.opaque<"TensorAccessor">
       %tensor_accessor = "ttkernel.TensorAccessor"(%args_override, %bank_address, %page_size) : (!ttkernel.TensorAccessorArgs, i32, i32) -> !ttkernel.TensorAccessor
 
-      return
-    }
-
-    // CHECK-LABEL: func @interleaved_addr_gen
-    func.func @interleaved_addr_gen() -> () attributes {ttkernel.thread = #ttkernel.thread<noc>} {
-      %cb = "ttkernel.get_compile_time_arg_val"() <{arg_index = 0 : i32}> : () -> !cb0_tiles
-      %data_format = "ttkernel.get_dataformat"(%cb) : (!cb0_tiles) -> !ttkernel.DataFormat
-
-      %is_dram = arith.constant 1 : i1
-      %bank_address = arith.constant 303104 : i32
-      %page_size = arith.constant 32 : i32
-
-      %interleaved_addr_gen = "ttkernel.get_interleaved_addr_gen_fast"(%is_dram, %bank_address, %page_size, %data_format) : (i1, i32, i32, !ttkernel.DataFormat) -> !ttkernel.interleaved_addr_gen_fast
-
-      %temp1 = arith.constant 0 : i32
-      %temp2 = arith.constant 32: i32
-      // CHECK: emitc.verbatim "uint64_t [[NOC_ADDR:.*]] = {}.get_noc_addr({}, {});" args
-      // CHECK: emitc.literal "[[NOC_ADDR]]" : i64
-      %noc_addr = "ttkernel.interleaved_addr_gen_fast.get_noc_addr"(%interleaved_addr_gen, %temp1, %temp2) : (!ttkernel.interleaved_addr_gen_fast, i32, i32) -> !ttkernel.noc_addr
       return
     }
 

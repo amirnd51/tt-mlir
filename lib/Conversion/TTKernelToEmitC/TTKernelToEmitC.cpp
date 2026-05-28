@@ -300,6 +300,13 @@ static FailureOr<int64_t> getStaticNocIndex(Operation *useOp,
   return nocIdx;
 }
 
+static std::string getNocName(FailureOr<int64_t> nocIdx) {
+  if (succeeded(nocIdx)) {
+    return "noc" + std::to_string(*nocIdx);
+  }
+  return "noc";
+}
+
 static void setInsertionPointToFunctionStart(Operation *useOp,
                                              OpBuilder &builder) {
   if (auto funcOp = useOp->getParentOfType<func::FuncOp>()) {
@@ -329,35 +336,29 @@ static std::string ensureFunctionScopedDeclaration(
 static std::string ensureNocDeclaration(Operation *useOp,
                                         ConversionPatternRewriter &rewriter,
                                         Value nocId = {}) {
-  constexpr llvm::StringLiteral nocName = "noc";
-  if (hasDominatingVerbatimWithPrefix(useOp, "Noc noc")) {
-    return nocName.str();
+  FailureOr<int64_t> nocIdx = getStaticNocIndex(useOp, nocId);
+  std::string nocName = getNocName(nocIdx);
+
+  if (hasDominatingVerbatimWithPrefix(useOp, "Noc " + nocName)) {
+    return nocName;
   }
 
   OpBuilder::InsertionGuard guard(rewriter);
-  if (nocId) {
-    FailureOr<int64_t> nocIdx = getStaticNocIndex(useOp, nocId);
-    if (succeeded(nocIdx)) {
-      setInsertionPointToFunctionStart(useOp, rewriter);
-      rewriter.create<emitc::VerbatimOp>(
-          useOp->getLoc(), "Noc noc(" + std::to_string(*nocIdx) + ");");
-    } else {
-      setInsertionPointAfterDefOrBlockStart(nocId, rewriter);
-      rewriter.create<emitc::VerbatimOp>(useOp->getLoc(), "Noc noc({});",
-                                         ValueRange{nocId});
-    }
+  if (succeeded(nocIdx)) {
+    setInsertionPointToFunctionStart(useOp, rewriter);
+    rewriter.create<emitc::VerbatimOp>(useOp->getLoc(),
+                                       "Noc " + nocName + "(" +
+                                           std::to_string(*nocIdx) + ");");
+  } else if (nocId) {
+    setInsertionPointAfterDefOrBlockStart(nocId, rewriter);
+    rewriter.create<emitc::VerbatimOp>(
+        useOp->getLoc(), "Noc " + nocName + "({});", ValueRange{nocId});
   } else {
     setInsertionPointToFunctionStart(useOp, rewriter);
-    FailureOr<int64_t> nocIdx = getStaticNocIndex(useOp);
-    if (succeeded(nocIdx)) {
-      rewriter.create<emitc::VerbatimOp>(
-          useOp->getLoc(), "Noc noc(" + std::to_string(*nocIdx) + ");");
-    } else {
-      rewriter.create<emitc::VerbatimOp>(useOp->getLoc(), "Noc noc;");
-    }
+    rewriter.create<emitc::VerbatimOp>(useOp->getLoc(), "Noc " + nocName + ";");
   }
 
-  return nocName.str();
+  return nocName;
 }
 
 static std::string
@@ -396,11 +397,6 @@ public:
     addConversion([ctx](mlir::tt::ttkernel::DataFormatType type) -> Type {
       return emitc::OpaqueType::get(ctx, "DataFormat");
     });
-    addConversion(
-        [ctx](mlir::tt::ttkernel::InterleavedAddrGenFastType type) -> Type {
-          // There is never a case in metal kernel code where template is false.
-          return emitc::OpaqueType::get(ctx, "InterleavedAddrGenFast<true>");
-        });
     addConversion(
         [ctx](mlir::tt::ttkernel::TensorAccessorArgsType type) -> Type {
           return emitc::OpaqueType::get(ctx, "TensorAccessorArgs");
@@ -1057,6 +1053,34 @@ public:
   }
 };
 
+struct NocEndpointExpr {
+  std::string object;
+  std::string args;
+};
+
+static NocEndpointExpr
+buildUnicastEndpointExpr(Operation *op, ConversionPatternRewriter &rewriter,
+                         ValueRange coreXY, ValueRange bankId, Value remoteAddr,
+                         SmallVectorImpl<Value> &operands) {
+  if (!coreXY.empty()) {
+    TT_assert(coreXY.size() == 2u);
+    std::string endpoint = ensureEndpointDeclaration(
+        op, rewriter, "UnicastEndpoint", "unicast_ep");
+    operands.append(coreXY.begin(), coreXY.end());
+    operands.push_back(remoteAddr);
+    return {endpoint, "{{.noc_x = {}, .noc_y = {}, "
+                      ".addr = static_cast<uint32_t>({})}"};
+  }
+
+  TT_assert(bankId.size() == 1u);
+  std::string endpoint = ensureEndpointDeclaration(
+      op, rewriter, "AllocatorBank<AllocatorBankType::DRAM>", "dram_ep");
+  operands.push_back(bankId.front());
+  operands.push_back(remoteAddr);
+  return {endpoint, "{{.bank_id = static_cast<uint32_t>({}), "
+                    ".addr = static_cast<uint32_t>({})}"};
+}
+
 template <typename SourceOp>
 class TTKernelToEmitCNocAsyncTransferRewriter
     : public OpConversionPattern<SourceOp> {
@@ -1089,47 +1113,172 @@ public:
 
     std::string nocName = ensureNocDeclaration(op.getOperation(), rewriter);
     SmallVector<Value, 5> operands{localL1Addr, adaptor.getSize()};
-    std::string callStr;
+    NocEndpointExpr endpoint = buildUnicastEndpointExpr(
+        op.getOperation(), rewriter, coreXY, bankId, remoteAddr, operands);
 
-    if (!coreXY.empty()) {
-      TT_assert(coreXY.size() == 2u);
-      std::string endpoint = ensureEndpointDeclaration(
-          op.getOperation(), rewriter, "UnicastEndpoint", "unicast_ep");
-      operands.append(coreXY.begin(), coreXY.end());
-      operands.push_back(remoteAddr);
-      if constexpr (isRead) {
-        callStr = nocName + ".async_read(" + endpoint +
-                  ", CoreLocalMem<uint32_t>({}), {}, "
-                  "{{.noc_x = {}, .noc_y = {}, "
-                  ".addr = static_cast<uint32_t>({})}, {{});";
-      } else {
-        callStr = nocName +
-                  ".async_write("
-                  "CoreLocalMem<uint32_t>({}), " +
-                  endpoint +
-                  ", {}, {{} , {{.noc_x = {}, .noc_y = {}, "
-                  ".addr = static_cast<uint32_t>({})});";
-      }
+    std::string callStr;
+    if constexpr (isRead) {
+      callStr = nocName + ".async_read(" + endpoint.object +
+                ", CoreLocalMem<uint32_t>({}), {}, " + endpoint.args +
+                ", {{});";
     } else {
-      TT_assert(bankId.size() == 1u);
-      std::string endpoint = ensureEndpointDeclaration(
-          op.getOperation(), rewriter, "AllocatorBank<AllocatorBankType::DRAM>",
-          "dram_ep");
-      operands.push_back(bankId.front());
-      operands.push_back(remoteAddr);
-      if constexpr (isRead) {
-        callStr = nocName + ".async_read(" + endpoint +
-                  ", CoreLocalMem<uint32_t>({}), {}, "
-                  "{{.bank_id = static_cast<uint32_t>({}), "
-                  ".addr = static_cast<uint32_t>({})}, {{});";
-      } else {
-        callStr = nocName +
-                  ".async_write("
-                  "CoreLocalMem<uint32_t>({}), " +
-                  endpoint +
-                  ", {}, {{} , {{.bank_id = static_cast<uint32_t>({}), "
-                  ".addr = static_cast<uint32_t>({})});";
-      }
+      callStr = nocName + ".async_write(CoreLocalMem<uint32_t>({}), " +
+                endpoint.object + ", {}, {{} , " + endpoint.args + ");";
+    }
+
+    rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+class TTKernelToEmitCNocAsyncReadOnePacketSetStateRewriter
+    : public OpConversionPattern<ttkernel::NocAsyncReadOnePacketSetStateOp> {
+public:
+  TTKernelToEmitCNocAsyncReadOnePacketSetStateRewriter(
+      TTKernelToEmitCTypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern(typeConverter, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(ttkernel::NocAsyncReadOnePacketSetStateOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    std::string nocName =
+        ensureNocDeclaration(op.getOperation(), rewriter, adaptor.getNoc());
+    SmallVector<Value, 4> operands{adaptor.getSize()};
+    NocEndpointExpr src = buildUnicastEndpointExpr(
+        op.getOperation(), rewriter, adaptor.getSrcCoreXY(),
+        adaptor.getSrcBankId(), adaptor.getSrcAddress(), operands);
+    std::string callStr = nocName +
+                          ".set_async_read_state<Noc::VcSelection::DEFAULT, "
+                          "NOC_MAX_BURST_SIZE>(" +
+                          src.object + ", {}, " + src.args + ");";
+    rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+class TTKernelToEmitCNocAsyncReadOnePacketWithStateRewriter
+    : public OpConversionPattern<ttkernel::NocAsyncReadOnePacketWithStateOp> {
+public:
+  TTKernelToEmitCNocAsyncReadOnePacketWithStateRewriter(
+      TTKernelToEmitCTypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern(typeConverter, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(ttkernel::NocAsyncReadOnePacketWithStateOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    std::string nocName =
+        ensureNocDeclaration(op.getOperation(), rewriter, adaptor.getNoc());
+    SmallVector<Value, 5> operands{adaptor.getDstLocalL1Addr(),
+                                   adaptor.getSize()};
+    NocEndpointExpr src = buildUnicastEndpointExpr(
+        op.getOperation(), rewriter, adaptor.getSrcCoreXY(),
+        adaptor.getSrcBankId(), adaptor.getSrcAddress(), operands);
+    std::string callStr = nocName +
+                          ".async_read_with_state<Noc::VcSelection::DEFAULT, "
+                          "NOC_MAX_BURST_SIZE>(" +
+                          src.object + ", CoreLocalMem<uint32_t>({}), {}, " +
+                          src.args + ", {{});";
+    rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+class TTKernelToEmitCNocAsyncWriteOnePacketWithTridRewriter
+    : public OpConversionPattern<ttkernel::NocAsyncWriteOnePacketWithTridOp> {
+public:
+  TTKernelToEmitCNocAsyncWriteOnePacketWithTridRewriter(
+      TTKernelToEmitCTypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern(typeConverter, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(ttkernel::NocAsyncWriteOnePacketWithTridOp op,
+                  OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    std::string nocName =
+        ensureNocDeclaration(op.getOperation(), rewriter, adaptor.getNoc());
+    SmallVector<Value, 6> operands{adaptor.getSrcLocalL1Addr(),
+                                   adaptor.getSize()};
+    NocEndpointExpr dst = buildUnicastEndpointExpr(
+        op.getOperation(), rewriter, adaptor.getDstCoreXY(),
+        adaptor.getDstBankId(), adaptor.getDstAddress(), operands);
+    operands.push_back(adaptor.getTrid());
+    std::string callStr = nocName +
+                          ".async_write<Noc::TxnIdMode::ENABLED, "
+                          "Noc::ResponseMode::NON_POSTED, NOC_MAX_BURST_SIZE>("
+                          "CoreLocalMem<uint32_t>({}), " +
+                          dst.object + ", {}, {{} , " + dst.args +
+                          ", NOC_UNICAST_WRITE_VC, {});";
+    rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+class TTKernelToEmitCNocInlineDwWriteRewriter
+    : public OpConversionPattern<ttkernel::NocInlineDwWriteOp> {
+public:
+  TTKernelToEmitCNocInlineDwWriteRewriter(
+      TTKernelToEmitCTypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern(typeConverter, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(ttkernel::NocInlineDwWriteOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    std::string nocName =
+        ensureNocDeclaration(op.getOperation(), rewriter, adaptor.getNocId());
+    SmallVector<Value, 5> operands{adaptor.getVal()};
+    NocEndpointExpr dst = buildUnicastEndpointExpr(
+        op.getOperation(), rewriter,
+        ValueRange{adaptor.getDstNocX(), adaptor.getDstNocY()}, ValueRange{},
+        adaptor.getDstLocalL1Addr(), operands);
+    operands.push_back(adaptor.getByteEnable());
+    std::string callStr =
+        nocName +
+        ".inline_dw_write<Noc::TxnIdMode::DISABLED, InlineWriteDst::L1, "
+        "Noc::ResponseMode::NON_POSTED>(" +
+        dst.object + ", {}, " + dst.args + ", {}, NOC_UNICAST_WRITE_VC);";
+    rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
+    rewriter.eraseOp(op);
+    return success();
+  }
+};
+
+template <typename SourceOp>
+class TTKernelToEmitCNocAsyncTileRewriter
+    : public OpConversionPattern<SourceOp> {
+  static constexpr bool isRead =
+      std::is_same_v<SourceOp, ttkernel::NocAsyncReadTileOp>;
+
+public:
+  TTKernelToEmitCNocAsyncTileRewriter(
+      TTKernelToEmitCTypeConverter &typeConverter, MLIRContext *ctx)
+      : OpConversionPattern<SourceOp>(typeConverter, ctx) {}
+
+  LogicalResult
+  matchAndRewrite(SourceOp op, typename SourceOp::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const final {
+    std::string nocName = ensureNocDeclaration(op.getOperation(), rewriter);
+    SmallVector<Value, 4> operands;
+    std::string callStr;
+    if constexpr (isRead) {
+      operands.append({adaptor.getAddrGenStruct(), adaptor.getDstLocalL1Addr(),
+                       adaptor.getAddrGenStruct(), adaptor.getId()});
+      callStr = nocName + ".async_read({}, CoreLocalMem<uint32_t>({}), "
+                          "{}.get_aligned_page_size(), "
+                          "{{.page_id = static_cast<uint32_t>({}), "
+                          ".offset_bytes = 0}, {{});";
+    } else {
+      operands.append({adaptor.getSrcLocalL1Addr(), adaptor.getAddrGenStruct(),
+                       adaptor.getAddrGenStruct(), adaptor.getId()});
+      callStr = nocName + ".async_write(CoreLocalMem<uint32_t>({}), {}, "
+                          "{}.get_aligned_page_size(), {{} , "
+                          "{{.page_id = static_cast<uint32_t>({}), "
+                          ".offset_bytes = 0});";
     }
 
     rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
@@ -1154,10 +1303,12 @@ public:
     std::string endpoint = ensureEndpointDeclaration(
         op.getOperation(), rewriter, "MulticastEndpoint", "mcast_ep");
 
+    // Only the loopback variant includes the source core in the multicast
+    // endpoint. The regular and one-packet variants preserve EXCLUDE_SRC.
     llvm::StringRef mcastMode =
-        std::is_same_v<SourceOp, ttkernel::NocAsyncWriteMulticastOp>
-            ? "Noc::McastMode::EXCLUDE_SRC"
-            : "Noc::McastMode::INCLUDE_SRC";
+        std::is_same_v<SourceOp, ttkernel::NocAsyncWriteMulticastLoopbackSrcOp>
+            ? "Noc::McastMode::INCLUDE_SRC"
+            : "Noc::McastMode::EXCLUDE_SRC";
     bool linked = op.getLinked().value_or(false);
 
     SmallVector<Value, 8> operands{
@@ -1171,9 +1322,18 @@ public:
         ".noc_x_end = {}, .noc_y_end = {}, "
         ".addr = static_cast<uint32_t>({})}";
 
-    std::string callStr = nocName + ".async_write_multicast<" +
-                          mcastMode.str() + ">(CoreLocalMem<uint32_t>({}), " +
-                          endpoint + ", {}, {}, {{} , " + dstArgs + ", " +
+    std::string templateArgs = "<" + mcastMode.str();
+    if constexpr (std::is_same_v<SourceOp,
+                                 ttkernel::NocAsyncWriteMulticastOnePacketOp>) {
+      templateArgs +=
+          ", Noc::TxnIdMode::DISABLED, Noc::ResponseMode::NON_POSTED, "
+          "NOC_MAX_BURST_SIZE";
+    }
+    templateArgs += ">";
+
+    std::string callStr = nocName + ".async_write_multicast" + templateArgs +
+                          "(CoreLocalMem<uint32_t>({}), " + endpoint +
+                          ", {}, {}, {{} , " + dstArgs + ", " +
                           (linked ? "true" : "false") + ");";
 
     rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
@@ -1410,65 +1570,6 @@ public:
   matchAndRewrite(Op op, Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const final {
     rewriter.replaceOp(op, adaptor.getOperands());
-    return success();
-  }
-};
-} // namespace
-
-namespace {
-class TTKernelGetInterleavedAddrGenFastOpRewriter
-    : public OpConversionPattern<ttkernel::GetInterleavedAddrGenFastOp> {
-  using Op = ttkernel::GetInterleavedAddrGenFastOp;
-
-public:
-  TTKernelGetInterleavedAddrGenFastOpRewriter(
-      const TypeConverter &typeConverter, MLIRContext *context)
-      : OpConversionPattern(typeConverter, context) {}
-
-  LogicalResult
-  matchAndRewrite(Op op, ttkernel::GetInterleavedAddrGenFastOp::Adaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const final {
-    if (op.getResult().getUses().empty()) {
-      rewriter.eraseOp(op);
-    } else {
-      mlir::Type opaqueStructType =
-          this->getTypeConverter()->convertType(op->getResultTypes()[0]);
-
-      mlir::Type lvalueType = emitc::LValueType::get(opaqueStructType);
-
-      // Declare the struct variable and then assign to its members
-      auto varOp = rewriter.create<emitc::VariableOp>(
-          op->getLoc(), lvalueType,
-          emitc::OpaqueAttr::get(op.getContext(), ""));
-
-      // Create an lvalue for all struct field accesses
-      auto lvalueBankBaseAddr = rewriter.create<emitc::MemberOp>(
-          op->getLoc(),
-          emitc::LValueType::get(adaptor.getBankBaseAddress().getType()),
-          "bank_base_address", varOp);
-      auto lvaluePageSize = rewriter.create<emitc::MemberOp>(
-          op->getLoc(), emitc::LValueType::get(adaptor.getPageSize().getType()),
-          "page_size", varOp);
-      auto lvalueDataFormat = rewriter.create<emitc::MemberOp>(
-          op->getLoc(),
-          emitc::LValueType::get(adaptor.getDataFormat().getType()),
-          "data_format", varOp);
-
-      // Assign corresponding values to the struct members
-      rewriter.create<emitc::AssignOp>(op->getLoc(), lvalueBankBaseAddr,
-                                       adaptor.getBankBaseAddress());
-      rewriter.create<emitc::AssignOp>(op->getLoc(), lvaluePageSize,
-                                       adaptor.getPageSize());
-      rewriter.create<emitc::AssignOp>(op->getLoc(), lvalueDataFormat,
-                                       adaptor.getDataFormat());
-
-      // Load the value from the lvalue variable
-      auto loadOp =
-          rewriter.create<emitc::LoadOp>(op->getLoc(), opaqueStructType, varOp);
-
-      // Replace the original operation with the loaded value so it can be used.
-      rewriter.replaceOp(op, loadOp.getResult());
-    }
     return success();
   }
 };
@@ -2207,22 +2308,7 @@ public:
         TTKernelToEmitCOpaqueRewriter<ttkernel::ClampScalarTileInt32Op>,
 
         TTKernelToEmitCOpaqueRewriter<ttkernel::GetNocAddrOp>,
-        TTKernelToEmitCOpaqueRewriter<ttkernel::NocAsyncReadTileOp>,
-        TTKernelToEmitCOpaqueRewriter<
-            ttkernel::NocAsyncReadOnePacketSetStateOp>,
-        TTKernelToEmitCOpaqueRewriter<
-            ttkernel::NocAsyncReadOnePacketWithStateOp>,
-        TTKernelToEmitCOpaqueRewriter<
-            ttkernel::NocAsyncReadOnePacketWithStateWithTridOp>,
-        TTKernelToEmitCOpaqueRewriter<ttkernel::NocAsyncReadSetTridOp>,
-        TTKernelToEmitCOpaqueRewriter<ttkernel::NocAsyncWriteTileOp>,
-        TTKernelToEmitCOpaqueRewriter<ttkernel::NocAsyncWriteSetTridOp>,
-        TTKernelToEmitCOpaqueRewriter<
-            ttkernel::NocAsyncWriteOnePacketWithTridOp>,
-        TTKernelToEmitCOpaqueRewriter<ttkernel::ResetNocTridBarrierCounterOp>,
         TTKernelToEmitCOpaqueRewriter<ttkernel::GetNocMulticastAddrOp>,
-        TTKernelToEmitCOpaqueRewriter<
-            ttkernel::NocAsyncWriteMulticastOnePacketOp>,
         TTKernelToEmitCOpaqueRewriter<ttkernel::ConvertLogicalXToTranslatedOp>,
         TTKernelToEmitCOpaqueRewriter<ttkernel::ConvertLogicalYToTranslatedOp>,
         TTKernelToEmitCOpaqueRewriter<ttkernel::GetMyDeviceIdOp>,
@@ -2257,13 +2343,17 @@ public:
 
     patterns.add<TTKernelToEmitCOpaqueRewriter<ttkernel::RemoteSramWriteU32Op>>(
         typeConverter, funcOp.getContext(), "noc_semaphore_set_remote");
-    patterns.add<TTKernelToEmitCOpaqueRewriter<ttkernel::NocInlineDwWriteOp>>(
-        typeConverter, funcOp.getContext());
 
     patterns.add<TTKernelToEmitCOpaqueRewriter<ttkernel::GetNocAddrOp>>(
         typeConverter, funcOp.getContext(), "get_noc_addr");
 
     patterns.add<
+        TTKernelToEmitCNocAsyncTileRewriter<ttkernel::NocAsyncReadTileOp>,
+        TTKernelToEmitCNocAsyncTileRewriter<ttkernel::NocAsyncWriteTileOp>,
+        TTKernelToEmitCNocAsyncReadOnePacketSetStateRewriter,
+        TTKernelToEmitCNocAsyncReadOnePacketWithStateRewriter,
+        TTKernelToEmitCNocAsyncWriteOnePacketWithTridRewriter,
+        TTKernelToEmitCNocInlineDwWriteRewriter,
         TTKernelToEmitCNocBarrierRewriter<ttkernel::NocAsyncReadBarrierOp>,
         TTKernelToEmitCNocBarrierRewriter<ttkernel::NocAsyncWriteBarrierOp>,
         TTKernelToEmitCNocBarrierRewriter<ttkernel::NocAsyncAtomicBarrierOp>,
@@ -2275,6 +2365,8 @@ public:
         TTKernelToEmitCNocAsyncTransferRewriter<ttkernel::NocAsyncWriteOp>,
         TTKernelToEmitCNocAsyncWriteMulticastRewriter<
             ttkernel::NocAsyncWriteMulticastOp>,
+        TTKernelToEmitCNocAsyncWriteMulticastRewriter<
+            ttkernel::NocAsyncWriteMulticastOnePacketOp>,
         TTKernelToEmitCNocAsyncWriteMulticastRewriter<
             ttkernel::NocAsyncWriteMulticastLoopbackSrcOp>>(
         typeConverter, funcOp.getContext());
@@ -2296,9 +2388,6 @@ public:
     patterns.add<TTKernelLoadFromL1OpToEmitCOpRewriter>(typeConverter,
                                                         funcOp.getContext());
 
-    patterns.add<TTKernelGetInterleavedAddrGenFastOpRewriter>(
-        typeConverter, funcOp.getContext());
-
     patterns.add<TTKernelTensorAccessorArgsOpRewriter>(typeConverter,
                                                        funcOp.getContext());
 
@@ -2312,10 +2401,8 @@ public:
         TTKernelClassMethodRewriter<ttkernel::TensorAccessorIsLocalBankOp>,
         TTKernelClassMethodRewriter<ttkernel::TensorAccessorIsLocalAddrOp>,
         TTKernelClassMethodRewriter<ttkernel::TensorAccessorIsLocalPageOp>,
-        TTKernelClassMethodRewriter<ttkernel::TensorAccessorIsLocalShardOp>,
-        TTKernelClassMethodRewriter<
-            ttkernel::InterleavedAddrGenFastGetNocAddrOp>>(typeConverter,
-                                                           funcOp.getContext());
+        TTKernelClassMethodRewriter<ttkernel::TensorAccessorIsLocalShardOp>>(
+        typeConverter, funcOp.getContext());
 
     patterns
         .add<ArithFloorDivRewriter, ArithBitcastRewriter, ArithMaxUIRewriter,

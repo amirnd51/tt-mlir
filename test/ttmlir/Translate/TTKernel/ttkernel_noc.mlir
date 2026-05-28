@@ -61,12 +61,13 @@ func.func @ttkernel_noc() -> () attributes {ttkernel.thread = #ttkernel.thread<n
     ttkernel.remote_sram_write_u32(%sem, %4) : (!ttkernel.local_semaphore, !ttkernel.noc_addr) -> ()
     // CHECK-DAG: int32_t [[INLINE_VALUE:.*]] = 7
     // CHECK-DAG: int8_t [[BE:.*]] = 15
-    // CHECK-DAG: int8_t [[NOC:.*]] = 1
+    // CHECK-DAG: int8_t [[NOC:.*]] = 0
     %inline_value = arith.constant 7 : i32
     %be = arith.constant 15 : i8
-    %noc = arith.constant 1 : i8
-    // CHECK: noc_inline_dw_write<InlineWriteDst::L1>([[NOCADDR1]], [[INLINE_VALUE]], [[BE]], [[NOC]])
-    ttkernel.noc_inline_dw_write(%4, %inline_value, %be, %noc) : (!ttkernel.noc_addr, i32, i8, i8) -> ()
+    %noc = arith.constant 0 : i8
+    // CHECK: noc0.inline_dw_write<Noc::TxnIdMode::DISABLED, InlineWriteDst::L1, Noc::ResponseMode::NON_POSTED>([[EP1]], [[INLINE_VALUE]]
+    // CHECK-SAME: .noc_x = [[A0]], .noc_y = [[A0]], .addr = static_cast<uint32_t>([[B1]])
+    ttkernel.noc_inline_dw_write(core[%c0_idx, %c0_idx], %c262208_i32, %inline_value, %be, %noc) : (index, index, i32, i32, i8, i8) -> ()
     // CHECK: [[NOC1]].async_read_barrier<Noc::BarrierMode::FULL>()
     ttkernel.noc_async_read_barrier() : () -> ()
     // CHECK: return
