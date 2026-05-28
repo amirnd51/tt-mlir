@@ -11,6 +11,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
@@ -45,7 +46,8 @@ ttcore::GridAttr getGridFromType(RankedTensorType type) {
 // view is directly returned without being consumed by a generic op, we must
 // insert a datamovement generic that forces the actual tensor transformation to
 // occur.
-Value materializeView(OpBuilder &builder, Location loc, Value viewResult) {
+Value materializeTensorView(OpBuilder &builder, Location loc,
+                            Value viewResult) {
   auto tensorType = mlir::cast<RankedTensorType>(viewResult.getType());
 
   // This pass runs pre-bufferization, so view ops have MetalLayoutAttr.
@@ -103,6 +105,75 @@ Value materializeView(OpBuilder &builder, Location loc, Value viewResult) {
   return genericOp.getResult(0);
 }
 
+Value materializeMemrefView(OpBuilder &builder, Location loc,
+                            ViewLayoutOp viewOp) {
+  Value viewResult = viewOp.getResult();
+  auto memrefType = mlir::cast<MemRefType>(viewResult.getType());
+  Value materialized =
+      builder.create<memref::AllocOp>(loc, memrefType).getResult();
+
+  SmallVector<int64_t> gridShape =
+      llvm::to_vector(ttcore::getGridShape(materialized));
+  auto gridAttr = builder.getAttr<ttcore::GridAttr>(gridShape);
+  ArrayAttr emptyArray = builder.getArrayAttr({});
+  ArrayAttr threads =
+      builder.getArrayAttr(builder.getAttr<ThreadAttr>(ThreadType::Unified));
+
+  auto genericOp = builder.create<GenericOp>(
+      loc, TypeRange{}, ValueRange{viewResult}, ValueRange{materialized},
+      ValueRange{}, gridAttr, emptyArray, emptyArray, emptyArray, threads,
+      /*fabricConnectionConfig=*/nullptr, /*regionsCount=*/1);
+
+  Region &region = genericOp.getRegion(0);
+  builder.createBlock(&region);
+  builder.setInsertionPointToStart(&region.front());
+
+  SmallVector<int64_t> shardShape =
+      llvm::to_vector(ttcore::getShardShape(materialized));
+  auto localType =
+      MemRefType::get(shardShape, memrefType.getElementType(),
+                      MemRefLayoutAttrInterface{}, memrefType.getMemorySpace());
+  Value localBuffer =
+      builder.create<memref::AllocOp>(loc, localType).getResult();
+
+  SmallVector<Value> remoteIndices;
+  remoteIndices.reserve(gridShape.size());
+  for (size_t dim = 0; dim < gridShape.size(); ++dim) {
+    remoteIndices.push_back(
+        builder.create<CoreIndexOp>(loc, static_cast<int64_t>(dim)));
+  }
+
+  builder.create<RemoteLoadOp>(loc, localBuffer, viewResult, remoteIndices);
+  builder.create<RemoteStoreOp>(
+      loc, /*resultTypes=*/TypeRange{}, materialized, remoteIndices,
+      localBuffer, /*cb=*/Value{}, /*startDevice=*/ValueRange{},
+      /*deviceMcastShape=*/ValueRange{}, /*semaphore=*/Value{},
+      /*semaphoreIndices=*/ValueRange{});
+
+  return materialized;
+}
+
+std::optional<Value> materializeView(OpBuilder &builder, Location loc,
+                                     Value viewResult) {
+  Operation *definingOp = viewResult.getDefiningOp();
+  if (!isViewOp(definingOp)) {
+    return std::nullopt;
+  }
+
+  OpBuilder::InsertionGuard guard(builder);
+  if (mlir::isa<RankedTensorType>(viewResult.getType())) {
+    return materializeTensorView(builder, loc, viewResult);
+  }
+
+  if (auto viewOp = mlir::dyn_cast<ViewLayoutOp>(definingOp)) {
+    if (mlir::isa<MemRefType>(viewResult.getType())) {
+      return materializeMemrefView(builder, loc, viewOp);
+    }
+  }
+
+  return std::nullopt;
+}
+
 class MaterializeViewReturnsPass
     : public impl::D2MMaterializeViewReturnsBase<MaterializeViewReturnsPass> {
 public:
@@ -124,11 +195,13 @@ public:
           Operation *definingOp = opOperand.get().getDefiningOp();
           if (isViewOp(definingOp)) {
             // Insert a generic op to materialize the view before returning.
-            // This ensures the tensor transformation represented by the view
-            // actually occurs, rather than just being a symbolic operation.
-            Value materialized =
+            // This ensures the transformation represented by the view actually
+            // occurs, rather than just being a symbolic operation.
+            std::optional<Value> materialized =
                 materializeView(builder, returnOp.getLoc(), opOperand.get());
-            opOperand.set(materialized);
+            if (materialized) {
+              opOperand.set(*materialized);
+            }
           }
         }
       });
@@ -149,10 +222,12 @@ public:
           if (isViewOp(inputDefiningOp)) {
             // Materialize the view before the device-to-host transfer.
             builder.setInsertionPoint(op);
-            Value materialized =
+            std::optional<Value> materialized =
                 materializeView(builder, op->getLoc(), toHostInput);
-            // Update the ToHostOp to use the materialized value.
-            op->setOperand(0, materialized);
+            if (materialized) {
+              // Update the device-to-host op to use the materialized value.
+              op->setOperand(0, *materialized);
+            }
           }
         }
       });
