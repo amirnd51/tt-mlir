@@ -11,7 +11,7 @@
 
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/IR/AffineMap.h"
-#include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "mlir/IR/PatternMatch.h"
 
 #include "llvm/ADT/DenseSet.h"
 #include "llvm/ADT/SmallBitVector.h"
@@ -258,10 +258,22 @@ public:
       D2MLowerMulticastLoads>::D2MLowerMulticastLoadsBase;
 
   void runOnOperation() final {
-    RewritePatternSet patterns(&getContext());
-    patterns.add<LowerMulticastLoadsRewriter>(&getContext());
-    if (failed(applyPatternsGreedily(getOperation(), std::move(patterns)))) {
-      signalPassFailure();
+    LowerMulticastLoadsRewriter pattern(&getContext());
+
+    SmallVector<RemoteLoadOp> remoteLoadOps;
+    getOperation().walk([&](RemoteLoadOp op) {
+      if (op.isHighLevelMcast()) {
+        remoteLoadOps.push_back(op);
+      }
+    });
+
+    for (RemoteLoadOp op : remoteLoadOps) {
+      PatternRewriter rewriter(&getContext());
+      rewriter.setInsertionPoint(op);
+      if (failed(pattern.matchAndRewrite(op, rewriter))) {
+        signalPassFailure();
+        return;
+      }
     }
   }
 };
