@@ -77,6 +77,7 @@ set(TTMETAL_INCLUDE_DIRS
   ${TTMETAL_SOURCE_DIR}/tt_stl
   ${TTMETAL_SOURCE_DIR}/tt_stl/tt_stl
   ${TTMETAL_BUILD_SYMLINK}/include
+  ${TTMETAL_SOURCE_DIR}/tt_metal/api/tt-metalium
   ${CPM_SOURCE_CACHE}/reflect/f93e77475670eaeacf332927dfe8b50e3f3812e0
   ${CPM_SOURCE_CACHE}/nanomsg/28cc32d5bdb6a858fe53b3ccf7e923957e53eada/include
   ${CPM_SOURCE_CACHE}/fmt/69912fb6b71fcb1f7e5deca191a2bb4748c4e7b6/include

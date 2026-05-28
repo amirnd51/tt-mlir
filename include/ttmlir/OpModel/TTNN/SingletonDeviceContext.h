@@ -21,6 +21,10 @@ namespace mlir {
 class Operation;
 } // namespace mlir
 
+namespace tt::tt_metal {
+class MetalEnv;
+} // namespace tt::tt_metal
+
 namespace tt::tt_metal::distributed {
 class MeshDevice;
 } // namespace tt::tt_metal::distributed
@@ -117,6 +121,11 @@ public:
   // (no real HW).
   bool isMockDevice() const { return m_isMockDevice; }
 
+  // Returns the device's compute grid shape as {rows, cols}, queried from the
+  // actual metal device. Use this instead of hardcoding per-arch defaults since
+  // the effective grid depends on the cluster descriptor's harvesting masks.
+  llvm::SmallVector<int64_t> getComputeGridShape() const;
+
 private:
   SingletonDeviceContext() = default;
   ~SingletonDeviceContext();
@@ -124,6 +133,11 @@ private:
   SingletonDeviceContext(const SingletonDeviceContext &) = delete;
   SingletonDeviceContext &operator=(const SingletonDeviceContext &) = delete;
 
+  // MetalEnv must outlive every MeshDevice that uses it (per metal_env.hpp),
+  // so declare BEFORE m_device — destruction order is reverse of declaration,
+  // so m_device dies first, then m_env. unique_ptr (not optional) because
+  // MetalEnv is non-movable and non-copyable.
+  std::unique_ptr<::tt::tt_metal::MetalEnv> m_env;
   std::shared_ptr<::tt::tt_metal::distributed::MeshDevice> m_device;
   ttcore::SystemDescAttr m_systemDesc;
 
