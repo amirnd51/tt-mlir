@@ -51,6 +51,15 @@ ChipDescAttr getOpChipDescAttr(Operation *op) {
   return systemDesc.getChipDesc(chipIds[0]);
 }
 
+NocIndex defaultNocForProcessor(Arch arch, int32_t processorIndex) {
+  // Quasar has a single NoC: every data-movement core uses NoC0.
+  if (arch == Arch::Quasar) {
+    return NocIndex::Noc0;
+  }
+  // Wormhole/Blackhole: DM processor 1 -> NoC0, DM processor 0 -> NoC1.
+  return processorIndex == 1 ? NocIndex::Noc0 : NocIndex::Noc1;
+}
+
 mlir::memref::GlobalOp createGlobal(ModuleOp moduleOp, StringRef name,
                                     mlir::MemRefType type, ElementsAttr value,
                                     bool constant, bool privateVisibility,

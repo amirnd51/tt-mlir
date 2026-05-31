@@ -57,8 +57,7 @@ module {
     // CHECK: %[[END_Y:[0-9]+]] = ttkernel.experimental::convert_logical_y_to_translated
     // CHECK: %[[END_X:[0-9]+]] = ttkernel.experimental::convert_logical_x_to_translated
     // CHECK: %[[NUM_DESTS:[0-9]+]] = arith.index_cast {{.*}} : index to i32
-    // CHECK: %[[NOC:[a-zA-Z0-9_]+]] = arith.constant 1 : i8
-    // CHECK: ttkernel.noc_async_write_multicast_loopback_src({{.*}}, {{.*}}, %[[NUM_DESTS]], start_xy[%[[END_X]], %[[END_Y]]], end_xy[%[[START_X]], %[[START_Y]]], {{.*}}, %[[NOC]], true)
+    // CHECK: ttkernel.noc_async_write_multicast_loopback_src({{.*}}, {{.*}}, %[[NUM_DESTS]], start_xy[%[[END_X]], %[[END_Y]]], end_xy[%[[START_X]], %[[START_Y]]], {{.*}}, noc %{{[a-zA-Z0-9_]+}}, linked true)
     %tx = d2m.dma_write %src[%c0], %dst[%c0] core[%c1, %c2] mcast[%c2, %c3], <1> : (memref<1x!ttcore.tile<32x32, f32>, #l1>, memref<1x!ttcore.tile<32x32, f32>, #l1>) -> !d2m.mem_tx<write>
     d2m.dma_wait %tx : !d2m.mem_tx<write>
     return

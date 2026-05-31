@@ -6,6 +6,7 @@
 #include "ttmlir/Dialect/D2M/IR/D2MGenericRegionOps.h"
 #include "ttmlir/Dialect/D2M/IR/D2MOps.h"
 #include "ttmlir/Dialect/D2M/Transforms/Passes.h"
+#include "ttmlir/Dialect/TTCore/IR/Utils.h"
 #include "ttmlir/FunctionTypes.h"
 
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
@@ -114,9 +115,16 @@ static int32_t resolveDmProcessorIndex(ThreadAttr thread,
       // For Quasar, the downstream passes will force assign NoC0.
       processorIdx = unassignedDmProcessorCounter++ % nDmCores;
     } else {
-      // For WH & BH, alternate between Core1-NoC0 and Core0-NoC1.
+      // For WH & BH, alternate between Core1-NoC0 and Core0-NoC1.  This is the
+      // inverse of ttcore::defaultNocForProcessor (the single source of truth
+      // for the DM-core <-> NoC convention); the assertion below pins the two
+      // together so they cannot drift.
       const int32_t nocIdx = unassignedDmProcessorCounter++ % nDmCores;
       processorIdx = 1 - nocIdx;
+      TT_assertv(static_cast<int32_t>(ttcore::defaultNocForProcessor(
+                     arch, processorIdx)) == nocIdx,
+                 "Fallback DM-core assignment disagrees with "
+                 "ttcore::defaultNocForProcessor.");
     }
   }
   return processorIdx;

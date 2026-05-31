@@ -107,12 +107,17 @@ def TTMetal_NocConfigAttr: TTMetal_Attr<"NocConfig", "noc_config", [TTMetal_Kern
   let summary = "TTMetal NocConfig attribute.";
   let description = [{
     Structure for configuring noc kernels.
+
+    The processor_index selects the data-movement (RISCV) core this kernel
+    launches on; noc_index selects the NoC it drives. See
+    ttcore::defaultNocForProcessor for the default processor -> NoC convention.
   }];
   let parameters = (ins "SymbolRefAttr":$kernel_symbol,
                         "CoreRangeAttr":$core_range,
                         "KernelArgsAttr":$kernel_args,
+                        "int32_t":$processor_index,
                         "mlir::tt::ttcore::NocIndex":$noc_index);
-  let assemblyFormat = "`<` $kernel_symbol `,` qualified($core_range) `,` qualified($kernel_args) `,` $noc_index `>`";
+  let assemblyFormat = "`<` $kernel_symbol `,` qualified($core_range) `,` qualified($kernel_args) `,` `processor` `=` $processor_index `,` $noc_index `>`";
   let extraClassDeclaration = [{
     mlir::tt::ttkernel::ThreadType getThreadType() const { return mlir::tt::ttkernel::ThreadType::Noc; }
   }];

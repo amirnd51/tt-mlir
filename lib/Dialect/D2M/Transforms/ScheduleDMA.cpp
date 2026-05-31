@@ -9,6 +9,7 @@
 #include "ttmlir/Dialect/D2M/IR/D2MOps.h"
 #include "ttmlir/Dialect/D2M/Utils/DMAUtils.h"
 #include "ttmlir/Dialect/TTCore/IR/TTCore.h"
+#include "ttmlir/Dialect/TTCore/IR/Utils.h"
 
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/IRMapping.h"
@@ -66,10 +67,18 @@ struct NocScore {
   }
 };
 
+// Inverse of ttcore::defaultNocForProcessor for the 2-DM-core (WH/BH) case:
+// given the NoC we want a thread to drive, return the DM processor index that
+// the single-source-of-truth convention maps to that NoC. NoC0 -> processor 1,
+// NoC1 -> processor 0.
+static int32_t processorForNoc(ttcore::NocIndex noc) {
+  return noc == ttcore::NocIndex::Noc0 ? 1 : 0;
+}
+
 // Wormhole/Blackhole have 2 DMs and 2 NoCs. After CBs have already been
 // load-balanced across two threads, choose which thread should use NoC0 versus
-// NoC1. The backend maps NoC0 to processor 1 and NoC1 to processor 0, so this
-// helper stores the equivalent processor index on each assignment.
+// NoC1, then store the processor index that maps to that NoC (see
+// ttcore::defaultNocForProcessor for the canonical convention).
 static void assignNoCsToThreads(
     SmallVectorImpl<DMAThreadAssignment> &assignments,
     const SmallVectorImpl<std::pair<Operation *, unsigned>> &dmaOps) {
@@ -115,8 +124,8 @@ static void assignNoCsToThreads(
       swapNocs ? ttcore::NocIndex::Noc1 : ttcore::NocIndex::Noc0;
   ttcore::NocIndex thread1Noc =
       swapNocs ? ttcore::NocIndex::Noc0 : ttcore::NocIndex::Noc1;
-  assignments[0].processorIndex = thread0Noc == ttcore::NocIndex::Noc0 ? 1 : 0;
-  assignments[1].processorIndex = thread1Noc == ttcore::NocIndex::Noc0 ? 1 : 0;
+  assignments[0].processorIndex = processorForNoc(thread0Noc);
+  assignments[1].processorIndex = processorForNoc(thread1Noc);
 }
 
 // There is no NoC choice to make. Use the thread index as the processor index.

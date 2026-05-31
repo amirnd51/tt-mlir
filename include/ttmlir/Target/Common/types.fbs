@@ -187,6 +187,20 @@ enum NocIndex : ushort {
   Noc1,
 }
 
+// Data-movement (RISCV) processor selecting which DM core a kernel launches on.
+// Wormhole/Blackhole have two (RISCV_0=BRISC, RISCV_1=NCRISC); Quasar has up to
+// eight (RISCV_0..RISCV_7 == DM0..DM7).
+enum DataMovementProcessor : ushort {
+  RISCV_0,
+  RISCV_1,
+  RISCV_2,
+  RISCV_3,
+  RISCV_4,
+  RISCV_5,
+  RISCV_6,
+  RISCV_7,
+}
+
 enum RoutingMode : ushort {
   BidirLineMesh,
   UnidirRingTorus,

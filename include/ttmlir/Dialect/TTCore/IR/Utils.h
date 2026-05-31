@@ -44,6 +44,21 @@ DeviceAttr lookupDevice(Operation *op,
 
 ChipDescAttr getOpChipDescAttr(Operation *op);
 
+// Canonical default data-movement-core -> NoC mapping.
+//
+// This is the single source of truth for the convention that downstream passes
+// (ScheduleDMA, the D2M->{TTMetal,TTKernel,TTNN} converters) use to pick a NoC
+// for a given data-movement processor when the user has not overridden it.
+//
+// Wormhole/Blackhole have 2 DM cores and 2 NoCs.  The convention pairs DM
+// processor 1 with NoC0 and DM processor 0 with NoC1.  This deliberately
+// mirrors the Metalium reader/writer presets, where a DRAM "reader" runs on
+// RISCV_1 (NCRISC) and uses NOC_0, while a DRAM "writer" runs on RISCV_0
+// (BRISC) and uses NOC_1.
+//
+// Quasar has 6 DM cores but a single NoC, so every processor maps to NoC0.
+NocIndex defaultNocForProcessor(Arch arch, int32_t processorIndex);
+
 // Create a global memref in the top-level module's symbol table.
 mlir::memref::GlobalOp createGlobal(ModuleOp moduleOp, StringRef name,
                                     MemRefType type, ElementsAttr value,

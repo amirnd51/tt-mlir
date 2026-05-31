@@ -335,35 +335,28 @@ static std::string getResultVariableName(Value result, llvm::StringRef prefix) {
   return (prefix + ssaName.substr(1)).str();
 }
 
-static std::string ensureNocDeclaration(Operation *useOp,
-                                        ConversionPatternRewriter &rewriter) {
-  constexpr llvm::StringLiteral nocName = "noc";
-  if (hasDominatingVerbatimWithPrefix(useOp, "Noc noc;") ||
-      hasDominatingVerbatimWithPrefix(useOp, "Noc noc(")) {
-    return nocName.str();
-  }
-
-  OpBuilder::InsertionGuard guard(rewriter);
-  setInsertionPointToFunctionStart(useOp, rewriter);
-  FailureOr<int64_t> nocIdx = getStaticNocIndex(useOp);
-  if (succeeded(nocIdx)) {
-    rewriter.create<emitc::VerbatimOp>(
-        useOp->getLoc(), "Noc noc(" + std::to_string(*nocIdx) + ");");
-  } else {
-    rewriter.create<emitc::VerbatimOp>(useOp->getLoc(), "Noc noc;");
-  }
-
-  return nocName.str();
-}
-
+// Resolves the C++ `Noc` object to use for a NoC op and ensures it is declared
+// at the top of the enclosing kernel function.
+//
+// The resolution prefers an explicit per-op `nocId` operand; when absent it
+// falls back to the NoC the kernel was launched on (its `NocConfigAttr`).
+//
+// Whenever the NoC index is statically known we emit an explicitly-indexed
+// object `Noc nocN(N);` (named `noc0`/`noc1`) rather than the ambiguous
+// `Noc noc(N);`. A single kernel may therefore declare both `noc0` and `noc1`
+// if it issues ops on both NoCs.
+//
+// A non-constant `nocId` (only knowable at runtime) cannot name a static
+// object, so it is spliced into an inline temporary `Noc({})`.
+//
+// If the index is not statically resolvable and there is no per-op nocId (e.g.
+// a kernel compiled in isolation, where the NoC is fixed by the launch-time
+// `noc_index`), we fall back to `Noc noc(noc_index);`, explicitly threading the
+// compile-time `noc_index` global rather than relying on the default ctor.
 static std::string ensureNocReference(Operation *useOp,
                                       ConversionPatternRewriter &rewriter,
                                       SmallVectorImpl<Value> &operands,
                                       Value nocId = {}) {
-  if (!nocId) {
-    return ensureNocDeclaration(useOp, rewriter);
-  }
-
   FailureOr<int64_t> nocIdx = getStaticNocIndex(useOp, nocId);
   if (succeeded(nocIdx)) {
     std::string nocName = "noc" + std::to_string(*nocIdx);
@@ -373,8 +366,17 @@ static std::string ensureNocReference(Operation *useOp,
                                            nocName);
   }
 
-  operands.push_back(nocId);
-  return "Noc({})";
+  if (nocId) {
+    // Explicit but non-constant nocId: splice the runtime value inline.
+    operands.push_back(nocId);
+    return "Noc({})";
+  }
+
+  // Unresolvable and no per-op override: construct from the launch-time
+  // `noc_index` global, stated explicitly.
+  return ensureFunctionScopedDeclaration(useOp, rewriter, "Noc noc(noc_index);",
+                                         "noc",
+                                         /*duplicateCheckPrefix=*/"Noc noc(");
 }
 
 static std::string
@@ -1069,7 +1071,7 @@ public:
                   ConversionPatternRewriter &rewriter) const final {
     SmallVector<Value, 1> operands;
     std::string nocName = ensureNocReference(op.getOperation(), rewriter,
-                                             operands, adaptor.getNocId());
+                                             operands, adaptor.getNoc());
     std::string callStr = nocName + ".async_atomic_barrier();";
 
     rewriter.create<emitc::VerbatimOp>(op.getLoc(), callStr, operands);
@@ -1165,7 +1167,15 @@ public:
       remoteAddr = adaptor.getDstAddress();
     }
 
-    std::string nocName = ensureNocDeclaration(op.getOperation(), rewriter);
+    // Resolve the Noc object from the op's optional `noc` operand (absent ->
+    // the kernel's launch NoC). These transfer ops splice their operands
+    // positionally into callStr, so a dynamic (non-constant) NoC object would
+    // break operand ordering; the compiler never produces one here.
+    SmallVector<Value, 1> nocOperands;
+    std::string nocName = ensureNocReference(op.getOperation(), rewriter,
+                                             nocOperands, adaptor.getNoc());
+    TT_assertv(nocOperands.empty(),
+               "dynamic NoC id is not supported for noc_async_read/write");
     SmallVector<Value, 5> operands{localL1Addr, adaptor.getSize()};
     std::string callStr;
 

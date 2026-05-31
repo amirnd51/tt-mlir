@@ -1196,6 +1196,17 @@ inline ::tt::target::NocIndex toFlatbuffer(FlatbufferObjectCache &cache,
   assert(false && "Unsupported NocIndex");
 }
 
+// Maps a data-movement (RISCV) processor index to its flatbuffer enum. Valid
+// range is [0, 7] (RISCV_0..RISCV_7); Wormhole/Blackhole use 0/1, Quasar 0..5.
+inline ::tt::target::DataMovementProcessor
+toFlatbufferDataMovementProcessor(int32_t processorIndex) {
+  assert(processorIndex >= 0 &&
+         processorIndex <= static_cast<int32_t>(
+                               ::tt::target::DataMovementProcessor::RISCV_7) &&
+         "DataMovementProcessor index out of range [0, 7]");
+  return static_cast<::tt::target::DataMovementProcessor>(processorIndex);
+}
+
 inline ::tt::target::RoutingMode toFlatbuffer(FlatbufferObjectCache &cache,
                                               ttcore::RoutingMode routingMode) {
   switch (routingMode) {

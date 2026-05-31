@@ -10,6 +10,32 @@ namespace target = ::tt::target;
 namespace tt_metal = ::tt::tt_metal;
 namespace distributed = ::tt::tt_metal::distributed;
 
+// Convert the flatbuffer NoC index to the Metalium NOC enum. The two enums
+// share their underlying values, so the conversion is a checked cast.
+static_assert(static_cast<uint8_t>(::tt::target::NocIndex::Noc0) ==
+              static_cast<uint8_t>(tt_metal::NOC::NOC_0));
+static_assert(static_cast<uint8_t>(::tt::target::NocIndex::Noc1) ==
+              static_cast<uint8_t>(tt_metal::NOC::NOC_1));
+static inline tt_metal::NOC convertNoc(::tt::target::NocIndex noc) {
+  return static_cast<tt_metal::NOC>(noc);
+}
+
+// Convert the flatbuffer DataMovementProcessor to the Metalium enum. Both
+// enumerate RISCV_0..RISCV_7 with matching values.
+static_assert(
+    static_cast<uint8_t>(::tt::target::DataMovementProcessor::RISCV_0) ==
+    static_cast<uint8_t>(tt_metal::DataMovementProcessor::RISCV_0));
+static_assert(
+    static_cast<uint8_t>(::tt::target::DataMovementProcessor::RISCV_1) ==
+    static_cast<uint8_t>(tt_metal::DataMovementProcessor::RISCV_1));
+static_assert(
+    static_cast<uint8_t>(::tt::target::DataMovementProcessor::RISCV_7) ==
+    static_cast<uint8_t>(tt_metal::DataMovementProcessor::RISCV_7));
+static inline tt_metal::DataMovementProcessor
+convertDataMovementProcessor(::tt::target::DataMovementProcessor processor) {
+  return static_cast<tt_metal::DataMovementProcessor>(processor);
+}
+
 std::string kernelConfigTypeString(
     const std::variant<tt_metal::DataMovementConfig, tt_metal::ComputeConfig>
         &kernelConfig) {
@@ -127,14 +153,18 @@ createKernelConfig(
       deviceAddressValidator, createSemaphoreFn, hostBuffers);
   switch (kernelConfig->type_type()) {
   case target::metal::KernelConfigType::NocConfig: {
-    switch (kernelConfig->type_as_NocConfig()->noc_index()) {
-    case tt::target::NocIndex::Noc0: {
-      return tt_metal::ReaderDataMovementConfig(compileArgs);
-    }
-    case tt::target::NocIndex::Noc1: {
-      return tt_metal::WriterDataMovementConfig(compileArgs);
-    }
-    }
+    // Build the data-movement config directly from the explicit (processor,
+    // noc) pair carried in the flatbuffer. We deliberately do NOT use
+    // Reader/WriterDataMovementConfig, which hardcode their own processor+noc
+    // presets and would discard the compiler's chosen DM core.
+    const auto *nocConfig = kernelConfig->type_as_NocConfig();
+    tt_metal::DataMovementConfig dataMovementConfig;
+    dataMovementConfig.processor =
+        convertDataMovementProcessor(nocConfig->processor());
+    dataMovementConfig.noc = convertNoc(nocConfig->noc_index());
+    dataMovementConfig.noc_mode = tt_metal::NOC_MODE::DM_DEDICATED_NOC;
+    dataMovementConfig.compile_args = compileArgs;
+    return dataMovementConfig;
   }
   case target::metal::KernelConfigType::EthernetConfig: {
     // EthernetConfig has been removed from Metal public API (commit cfc4c40).
