@@ -106,7 +106,13 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     add_compile_definitions(TT_BUILD_DEBUG TTMLIR_ENABLE_DEBUG_LOGS)
 endif()
 
-add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR})
+add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR}
+  # MOLA local patch (2026-05-11): MOLA's bundled LLVM (sha 8f264586d752,
+  # Dec 12 2025) marks OpBuilder::create<OpTy> deprecated in favor of
+  # OpTy::create. tt-mlir source still uses the old form throughout;
+  # silence the warning so -Werror doesn't fail the build when linking
+  # against MOLA's LLVM.
+  -Wno-deprecated-declarations)
 
 set(CMAKE_LINKER_TYPE DEFAULT)
 if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -164,7 +170,14 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
 include_directories(${TTMLIR_SOURCE_DIR}/include)
 include_directories(${TTMLIR_BINARY_DIR}/include)
-include_directories(${TTMLIR_TOOLCHAIN_DIR}/include)
+# MOLA local patch (2026-05-11): mark toolchain include dir as SYSTEM
+# so it's searched AFTER MLIR_INCLUDE_DIRS. When MLIR_DIR points at a
+# different LLVM install (e.g. /home/amirnass/projects/mola/build/llvm-install)
+# than the toolchain, the toolchain headers (at a different LLVM sha)
+# must NOT shadow the MLIR install's headers — otherwise we get header
+# vs lib mismatches like "no viable conversion from RegionBranchPoint
+# to RegionSuccessor" against the linked libMLIR.so's ABI.
+include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/include)
 link_directories(${LLVM_BUILD_LIBRARY_DIR})
 add_definitions(${LLVM_DEFINITIONS})
 include(TTMLIRPythonSitePackages)
@@ -172,11 +185,28 @@ include(TTMLIRPythonSitePackages)
 add_subdirectory(third_party)
 if (TTMLIR_ENABLE_STABLEHLO)
   set(STABLEHLO_BUILD_EMBEDDED ON)
-  set(STABLEHLO_ENABLE_BINDINGS_PYTHON ON)
+  # MOLA F3 (2026-05-12): MOLA's LLVM install was built without
+  # MLIR_ENABLE_BINDINGS_PYTHON, so MLIRPythonSources / MLIRPythonExtension
+  # targets don't exist. The C++ compile chain doesn't need Python
+  # bindings; force OFF to allow STABLEHLO=ON without Python deps.
+  set(STABLEHLO_ENABLE_BINDINGS_PYTHON OFF)
   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/shardy)
   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/shardy)
   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/stablehlo)
   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo)
+  # MOLA F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
+  # add_compile_options BEFORE the add_subdirectory call. Newer LLVM/MLIR
+  # TableGen emits unqualified `TokenType` references in each stablehlo
+  # *.cpp.inc verifier predicate (StablehloOps.cpp.inc, InterpreterOps.cpp.
+  # inc, …). The .inc files are included at file scope outside of
+  # `namespace mlir::stablehlo`. The toolchain stablehlo source can't be
+  # modified in-place, so we inject the `using` via -include applied to
+  # every translation unit in the stablehlo subtree. The injected header
+  # only defines `using mlir::stablehlo::TokenType;` so it's benign for
+  # files that don't reference TokenType — repeat `using` declarations
+  # in the same scope are valid.
+  add_compile_options(
+    "-include${CMAKE_CURRENT_SOURCE_DIR}/../stablehlo_using_token.h")
   add_subdirectory(${TTMLIR_TOOLCHAIN_DIR}/src/shardy ${CMAKE_CURRENT_BINARY_DIR}/shardy EXCLUDE_FROM_ALL)
   add_subdirectory(${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo ${CMAKE_CURRENT_BINARY_DIR}/stablehlo EXCLUDE_FROM_ALL)
   install(DIRECTORY shardy ${CMAKE_CURRENT_BINARY_DIR}/shardy/shardy

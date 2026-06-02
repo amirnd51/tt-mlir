@@ -68,12 +68,16 @@ void createStableHLOToTTIRPipeline(
   }
   pm.addPass(mlir::createInlinerPass());
   if (options.enableAggressiveSimplification) {
-    pm.addPass(
+    // MOLA F3 (2026-05-12): post-bump these stablehlo simplifier passes
+    // are restricted to `func.func`. Nest them under func.func so the
+    // pass-manager accepts them when the parent pm is module-scoped.
+    pm.nest<mlir::func::FuncOp>().addPass(
         ::mlir::stablehlo::createStablehloAggressiveSimplificationPass());
   }
   // Expand complex math ops (e.g. mul, sqrt, log) into real arithmetic before
   // converting complex types to float-pair representation.
-  pm.addPass(::mlir::stablehlo::createStablehloComplexMathExpanderPass());
+  pm.nest<mlir::func::FuncOp>().addPass(
+      ::mlir::stablehlo::createStablehloComplexMathExpanderPass());
   // Convert complex types to float-pair representation before lowering.
   pm.addPass(
       mlir::tt::stablehlo::createStableHLOComplexDataTypeConversionPass());
