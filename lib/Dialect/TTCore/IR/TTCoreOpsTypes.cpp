@@ -913,14 +913,25 @@ llvm::SmallVector<int64_t>
 MetalLayoutAttr::getDeviceShape(ArrayRef<int64_t> gridShape,
                                 ArrayRef<int64_t> tileShape) const {
   llvm::SmallVector<int64_t> physicalShape = getPhysicalShape(tileShape);
-  llvm::SmallVector<int64_t> deviceShape(gridShape);
+  // MOLA local patch (2026-05-05, patch 10): pad gridShape with 1s
+  // to match physicalShape's rank. Higher-rank tensors (e.g. Llama's
+  // 4D-6D activations after tile expansion) iterate physicalShape
+  // beyond the device's mesh-grid rank (typically 2D); without
+  // padding, gridShape[i] is OOB. Padding with 1 corresponds to
+  // "no grid distribution on this dim" which is the correct
+  // semantic for non-mesh dims.
+  llvm::SmallVector<int64_t> paddedGrid(gridShape.begin(), gridShape.end());
+  while (paddedGrid.size() < physicalShape.size()) {
+    paddedGrid.insert(paddedGrid.begin(), 1);
+  }
+  llvm::SmallVector<int64_t> deviceShape(paddedGrid);
   deviceShape.reserve(physicalShape.size() * 2);
 
   // Divide grid dimensions in physical shape by tile dimensions to obtain the
   // shard shape and append it to the device shape.
   for (size_t i = 0; i < physicalShape.size(); ++i) {
     const int64_t dim = physicalShape[i];
-    const int64_t gridDim = gridShape[i];
+    const int64_t gridDim = paddedGrid[i];
     TT_assertv(dim % gridDim == 0,
                "Collapsed dimension must be evenly divisible by grid "
                "dimension, got {} % {} != 0.",

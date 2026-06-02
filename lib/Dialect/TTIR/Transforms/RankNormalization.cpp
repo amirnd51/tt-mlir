@@ -13,6 +13,7 @@
 #include "mlir/IR/Builders.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/DialectResourceBlobManager.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "llvm/ADT/DenseSet.h"
 
@@ -187,21 +188,36 @@ private:
   }
 
   static void updateConstantValueAttr(ttir::ConstantOp constantOp) {
-    auto valueAttr = dyn_cast<DenseElementsAttr>(constantOp.getValue());
-    if (!valueAttr) {
-      return;
-    }
     auto resultType =
         dyn_cast<RankedTensorType>(constantOp.getResult().getType());
     if (!resultType) {
       return;
     }
-    auto valueType = dyn_cast<RankedTensorType>(valueAttr.getType());
-    if (!valueType || valueType.getShape() == resultType.getShape()) {
+    if (auto valueAttr =
+            dyn_cast<DenseElementsAttr>(constantOp.getValue())) {
+      auto valueType = dyn_cast<RankedTensorType>(valueAttr.getType());
+      if (!valueType || valueType.getShape() == resultType.getShape()) {
+        return;
+      }
+      constantOp.setValueAttr(DenseElementsAttr::getFromRawBuffer(
+          resultType, valueAttr.getRawData()));
       return;
     }
-    constantOp.setValueAttr(DenseElementsAttr::getFromRawBuffer(
-        resultType, valueAttr.getRawData()));
+    // MOLA local patch (originally 05-rank-normalization-dense-resource):
+    // Handle DenseResourceElementsAttr — rebuild with the new (rank-
+    // normalized) type, preserving the resource handle. The handle
+    // points at the same byte buffer, layout-equivalent under rank
+    // normalization (only adds leading unit dims, no reshape).
+    if (auto resourceAttr =
+            dyn_cast<DenseResourceElementsAttr>(constantOp.getValue())) {
+      auto valueType =
+          dyn_cast<RankedTensorType>(resourceAttr.getType());
+      if (!valueType || valueType.getShape() == resultType.getShape()) {
+        return;
+      }
+      constantOp.setValueAttr(DenseResourceElementsAttr::get(
+          resultType, resourceAttr.getRawHandle()));
+    }
   }
 
   static void updateArangeDimension(ttir::ArangeOp arangeOp) {
