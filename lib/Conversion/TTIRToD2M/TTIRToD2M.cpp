@@ -17,6 +17,7 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Utils.h"
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -441,6 +442,38 @@ protected:
                                  ttcore::OOBVal::Undef);
   }
 
+  // MOLA local hook (2026-06-03): per-tensor L1/DRAM placement override.
+  // MOLA's policy layer (driven by mola.target) annotates individual
+  // tensors with a `mola.memspace` = "l1" | "dram" StringAttr — on the
+  // owning func argument for leaf inputs, or on the defining op for
+  // intermediates. Honored HERE, before the data-movement region is
+  // generated, so remote_load-vs-local-read codegen is derived
+  // consistently (a post-ttir-to-d2m MetalLayoutAttr flip is unsound —
+  // it desyncs the already-baked addressing). Absent the attr, the
+  // role default (memorySpaces[role]) is used unchanged.
+  static ttcore::MemorySpace resolveMolaMemSpace(Value v,
+                                                 ttcore::MemorySpace dflt) {
+    mlir::StringAttr s;
+    if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(v)) {
+      if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+              barg.getOwner()->getParentOp())) {
+        s = fn.getArgAttrOfType<mlir::StringAttr>(barg.getArgNumber(),
+                                                  "mola.memspace");
+      }
+    } else if (mlir::Operation *def = v.getDefiningOp()) {
+      s = def->getAttrOfType<mlir::StringAttr>("mola.memspace");
+    }
+    if (s) {
+      if (s.getValue() == "l1") {
+        return ttcore::MemorySpace::DeviceL1;
+      }
+      if (s.getValue() == "dram") {
+        return ttcore::MemorySpace::DeviceDRAM;
+      }
+    }
+    return dflt;
+  }
+
   // Insert ToLayout operations for a genericOp's operands and results,
   // including sharding and tilizing, with simple 1x1 grids; grid optimization
   // happens later in the D2MGridSelection pass.
@@ -451,15 +484,17 @@ protected:
     std::array<mlir::SmallVector<Value>, 2> result;
 
     for (Value operand : operandsAndResults[0]) {
-      result[0].push_back(createOptimalLayoutOp(operand, memorySpaces[0], tiled,
-                                                noCollapse, rewriter, oobVal));
+      result[0].push_back(createOptimalLayoutOp(
+          operand, resolveMolaMemSpace(operand, memorySpaces[0]), tiled,
+          noCollapse, rewriter, oobVal));
     }
     // Outputs always use Undef: they are destination buffers being written
     // into, so their padding fill value is irrelevant.  Only inputs need
     // identity-element OOB to prevent padded tiles from corrupting reductions.
     for (Value operand : operandsAndResults[1]) {
-      result[1].push_back(createOptimalLayoutOp(operand, memorySpaces[1], tiled,
-                                                noCollapse, rewriter));
+      result[1].push_back(createOptimalLayoutOp(
+          operand, resolveMolaMemSpace(operand, memorySpaces[1]), tiled,
+          noCollapse, rewriter));
     }
 
     return result;
