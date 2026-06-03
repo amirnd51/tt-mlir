@@ -151,6 +151,18 @@ struct D2MPipelineOptions : public PassPipelineOptions<D2MPipelineOptions> {
           "Force all non-bound allocator variables to spill into DRAM."),
       llvm::cl::init(false)};
 
+  // MOLA local hook (2026-05-12): a pass-pipeline string parsed and run
+  // right after ttir-to-d2m (where tensors carry per-tensor
+  // MetalLayoutAttr memory_space) and before grid-selection. Lets an
+  // out-of-tree policy layer (MOLA) annotate per-tensor L1/DRAM placement
+  // that D2MAllocate then honors. Empty = no-op; the named pass must be
+  // in the global pass registry at runtime.
+  Option<std::string> molaPlacementPipeline{
+      *this, "mola-placement-pipeline",
+      llvm::cl::desc("Pass-pipeline run after ttir-to-d2m for MOLA "
+                     "per-tensor placement annotation (empty = off)."),
+      llvm::cl::init("")};
+
   // The allocator will not consider generic outputs eligible for spilling
   // unless this option is turned on.
   Option<bool> allowL1OutputSpilling{

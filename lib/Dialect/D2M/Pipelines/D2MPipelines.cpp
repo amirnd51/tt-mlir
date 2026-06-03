@@ -21,6 +21,7 @@
 #include "mlir/Dialect/Linalg/Passes.h"
 #include "mlir/Dialect/MemRef/Transforms/Passes.h"
 #include "mlir/Pass/PassManager.h"
+#include "mlir/Pass/PassRegistry.h"
 #include "mlir/Transforms/Passes.h"
 
 namespace mlir::tt::ttmetal {
@@ -110,6 +111,19 @@ void createD2MFrontendPipeline(OpPassManager &pm,
     toD2MOptions.enableMulticastInference = options.enableMulticastInference;
   }
   pm.addPass(tt::createTTIRToD2MPass(toD2MOptions));
+  // MOLA local hook (2026-05-12): run an out-of-tree per-tensor placement
+  // policy right after ttir-to-d2m (tensors now carry MetalLayoutAttr
+  // memory_space) and before grid-selection / allocate. The named pass
+  // resolves from the global pass registry at runtime (registered by the
+  // MOLA driver). No-op when the option is empty.
+  if (!options.molaPlacementPipeline.empty()) {
+    if (mlir::failed(mlir::parsePassPipeline(options.molaPlacementPipeline, pm,
+                                             llvm::errs()))) {
+      llvm::errs() << "createD2MFrontendPipeline: failed to parse "
+                      "mola-placement-pipeline='"
+                   << options.molaPlacementPipeline << "'\n";
+    }
+  }
   pm.addPass(d2m::createD2MScalarizeConstTensors());
   d2m::D2MGridSelectionOptions gridOptOptions;
   {
