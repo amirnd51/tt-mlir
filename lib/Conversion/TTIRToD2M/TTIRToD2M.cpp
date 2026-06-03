@@ -17,6 +17,7 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Utils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
@@ -3017,6 +3018,63 @@ public:
   }
 };
 
+// MOLA local patch (re-authored 2026-06-03, originally patch 08):
+// D2MConstantOpRewriter. Lowers ttir.constant (with DenseElementsAttr or
+// DenseResourceElementsAttr value) to arith.constant + d2m.to_layout.
+// Splat ttir.constants are canonicalized to ttir.full/zeros/ones earlier
+// and handled by D2MConstantFillOpRewriter; this pattern handles the
+// non-splat case (real model weights via dense_resource), required for QKV
+// / any HuggingFace Llama checkpoint flow through the TTMetal chain.
+//
+// Approach: replace ttir.constant with a plain arith.constant carrying the
+// same (logical, unencoded) tensor value. The type converter here is the
+// identity, so a ttir.constant result is an unencoded RankedTensorType —
+// exactly the form func arguments and other creation ops are in at this
+// stage. Downstream tensor-manipulation views (permute/reshape) and the
+// generic-operand staging (toLayoutOperandsAndResults -> d2m.to_layout)
+// then attach the metal_layout encoding / memory space uniformly, the same
+// way they do for func-argument inputs. MLIR's standard bufferization later
+// lowers arith.constant to a memref::GlobalOp + memref::GetGlobalOp pair,
+// which the flatbuffer translator already handles.
+//
+// (An earlier version additionally emitted a d2m.to_layout into a
+// no-encoding d2m.empty; with the identity type converter that produced a
+// degenerate to_layout, and a downstream permute/reshape then built a
+// d2m.view_layout across it that tripped the "view cannot change memory
+// space" verifier on real-weight QKV. Emitting just arith.constant keeps
+// the constant on the same logical path as func args and avoids it.)
+class D2MConstantOpRewriter : public OpConversionPattern<ttir::ConstantOp> {
+  using OpConversionPattern<ttir::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto resultTy = mlir::dyn_cast<RankedTensorType>(op.getResult().getType());
+    if (!resultTy) {
+      return rewriter.notifyMatchFailure(op, "non-ranked-tensor result");
+    }
+    // Logical (unencoded) tensor type so the value attr's shape matches.
+    auto unencodedTy =
+        RankedTensorType::get(resultTy.getShape(), resultTy.getElementType());
+
+    auto valueAttr = mlir::dyn_cast<TypedAttr>(op.getValueAttr());
+    if (!valueAttr) {
+      return rewriter.notifyMatchFailure(
+          op, "ttir.constant value attr is not a TypedAttr");
+    }
+    if (auto shapedTy = mlir::dyn_cast<ShapedType>(valueAttr.getType())) {
+      if (shapedTy.getElementType() != unencodedTy.getElementType()) {
+        return rewriter.notifyMatchFailure(
+            op, "ttir.constant value element type doesn't match result");
+      }
+    }
+
+    rewriter.replaceOpWithNewOp<mlir::arith::ConstantOp>(op, unencodedTy,
+                                                         valueAttr);
+    return success();
+  }
+};
+
 /// Lowers `ttir.rand` to a `d2m.generic` of `d2m.tile_rand` tiles, mapping
 /// `[low, high)` to the kernel's `[from, from + scale)` form. Non-f32 outputs
 /// are generated in f32 and then cast via a second `d2m.generic` wrapping
@@ -3903,10 +3961,22 @@ public:
 
     auto outTy = mlir::cast<RankedTensorType>(outputs[0].getType());
     auto layout = mlir::cast<ttcore::MetalLayoutAttr>(outTy.getEncoding());
+    // A d2m.view_layout is a reinterpretation and MUST preserve the memory
+    // space of its source (verifier: "view cannot change memory space"). The
+    // result layout therefore takes the *input's* memory space, NOT the DPS
+    // output's — consistent with D2MPermuteRewriter (inputLayout.
+    // getMemorySpace()). When default-input-memspace != default-output-
+    // memspace (MOLA's dram-input/l1-output split, or a per-tensor
+    // mola.memspace), the DPS output sits in the output space while the
+    // input/view sits in the input space; using the output space built a
+    // memspace-crossing view that ICE'd real-weight QKV (transpose+reshape on
+    // a 2048-wide weight). (MOLA local patch 2026-06-03.)
+    auto inLayout = mlir::cast<ttcore::MetalLayoutAttr>(
+        mlir::cast<RankedTensorType>(inputs[0].getType()).getEncoding());
     auto newLayout = ttcore::MetalLayoutAttr::get(
-        layout.getContext(), layout.getLogicalShape(), layout.getMemorySpace(),
-        layout.getMemoryLayout(), layout.getCollapsedIntervals(),
-        layout.getDimAlignments());
+        layout.getContext(), layout.getLogicalShape(),
+        inLayout.getMemorySpace(), layout.getMemoryLayout(),
+        layout.getCollapsedIntervals(), layout.getDimAlignments());
     auto newOutTy = RankedTensorType::get(outTy.getShape(),
                                           outTy.getElementType(), newLayout);
 
@@ -4442,6 +4512,10 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
 
   // Creation ops 1:1 conversion.
   patterns.add<D2MEmptyOpRewriter>(typeConverter, ctx);
+
+  // Non-splat constant (real weights via dense_resource) -> arith.constant
+  // + d2m.to_layout (MOLA re-authored patch 08).
+  patterns.add<D2MConstantOpRewriter>(typeConverter, ctx);
 
   // Mesh ops 1:1 conversion.
   patterns.add<D2MMeshShardOpRewriter>(typeConverter, ctx);

@@ -1017,9 +1017,26 @@ static flatbuffers::Offset<::flatbuffers::Vector<uint8_t>>
 memrefGlobalOpToFlatbufferByteVector(FlatbufferObjectCache &cache,
                                      memref::GlobalOp globalOp) {
   auto value = mlir::cast<MemRefType>(globalOp.getTypeAttr().getValue());
+  flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data;
+
+  // Real (non-splat) model weights enter as ttir.constant with a
+  // DenseResourceElementsAttr (dense_resource<...>), which MOLA lowers to
+  // arith.constant -> memref.global. The resource holds the tensor's raw
+  // bytes already in element order/endianness, so emit them directly. The
+  // DenseElementsAttr path (splat / small inline constants) keeps the
+  // existing typed conversion. Mirrors the TTNN translator's ConstantOp
+  // handling (TTNNToFlatbuffer.cpp). Required for QKV / real-weight Llama
+  // on the TTMetal chain. (MOLA local patch 2026-06-03, re-authored 06.)
+  if (auto resourceAttr = mlir::dyn_cast<mlir::DenseResourceElementsAttr>(
+          globalOp.getInitialValueAttr())) {
+    ArrayRef<char> rawData = resourceAttr.getData();
+    data = cache.fbb->CreateVector(
+        reinterpret_cast<const uint8_t *>(rawData.data()), rawData.size());
+    return data;
+  }
+
   auto initialValueAttr =
       mlir::cast<mlir::DenseElementsAttr>(globalOp.getInitialValueAttr());
-  flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data;
 
   if (mlir::isa<FloatType>(value.getElementType())) {
     unsigned bitWidth = value.getElementType().getIntOrFloatBitWidth();
