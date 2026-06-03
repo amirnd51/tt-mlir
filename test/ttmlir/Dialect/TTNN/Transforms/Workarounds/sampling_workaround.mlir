@@ -27,13 +27,9 @@ module attributes {} {
       -> tensor<1xi32, #ttnn_layout_out> {
     // CHECK-LABEL: func.func @sampling_tile_inputs_get_row_major
     // CHECK: %[[IDX:.*]] = "ttnn.to_layout"(%arg1)
-    // CHECK-SAME: layout = #ttnn.layout<row_major>
     // CHECK: %[[K:.*]] = "ttnn.to_layout"(%arg2)
-    // CHECK-SAME: layout = #ttnn.layout<row_major>
     // CHECK: %[[P:.*]] = "ttnn.to_layout"(%arg3)
-    // CHECK-SAME: layout = #ttnn.layout<row_major>
     // CHECK: %[[T:.*]] = "ttnn.to_layout"(%arg4)
-    // CHECK-SAME: layout = #ttnn.layout<row_major>
     // CHECK: "ttnn.sampling"(%arg0, %[[IDX]], %[[K]], %[[P]], %[[T]])
     %0 = "ttnn.sampling"(%arg0, %arg1, %arg2, %arg3, %arg4)
         : (tensor<1x32xbf16, #ttnn_layout_vals_tile>,

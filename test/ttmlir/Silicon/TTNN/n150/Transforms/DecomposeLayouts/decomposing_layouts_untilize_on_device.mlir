@@ -22,9 +22,8 @@ module attributes {} {
         // CHECK-LABEL: func.func @from_l1_tile_to_dram_rm_bf16
         // CHECK: %[[MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
         // CHECK: %[[TO_LAYOUT:.*]] = "ttnn.to_layout"(%[[MEM_CONFIG]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
         // CHECK: return %[[TO_LAYOUT]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>}> : (tensor<32x2048xbf16, #ttnn_layout_device_l1_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0)  : (tensor<32x2048xbf16, #ttnn_layout_device_l1_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
         return %0 : tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
     }
 
@@ -34,9 +33,8 @@ module attributes {} {
         // CHECK-LABEL: func.func @from_l1_tile_to_dram_rm_f32
         // CHECK: %[[MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
         // CHECK: %[[TO_LAYOUT:.*]] = "ttnn.to_layout"(%[[MEM_CONFIG]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
         // CHECK: return %[[TO_LAYOUT]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>}> : (tensor<32x2048xf32, #ttnn_layout_device_l1_tile_f32>) -> tensor<32x2048xf32, #ttnn_layout_device_dram_rm_f32>
+        %0 = "ttnn.to_layout"(%arg0)  : (tensor<32x2048xf32, #ttnn_layout_device_l1_tile_f32>) -> tensor<32x2048xf32, #ttnn_layout_device_dram_rm_f32>
         return %0 : tensor<32x2048xf32, #ttnn_layout_device_dram_rm_f32>
     }
 
@@ -45,10 +43,9 @@ module attributes {} {
     func.func @from_dram_tile_to_l1_rm_bf16(%arg0: tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_l1_rm_bf16> {
         // CHECK-LABEL: func.func @from_dram_tile_to_l1_rm_bf16
         // CHECK: %[[TO_LAYOUT:.*]] = "ttnn.to_layout"(%arg0)
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
         // CHECK: %[[MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%[[TO_LAYOUT]])
         // CHECK: return %[[MEM_CONFIG]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>}> : (tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_l1_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0)  : (tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_l1_rm_bf16>
         return %0 : tensor<32x2048xbf16, #ttnn_layout_device_l1_rm_bf16>
     }
 
@@ -56,9 +53,8 @@ module attributes {} {
     func.func @from_dram_tile_to_dram_rm_bf16(%arg0: tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16> {
         // CHECK-LABEL: func.func @from_dram_tile_to_dram_rm_bf16
         // CHECK: %[[TO_LAYOUT:.*]] = "ttnn.to_layout"(%arg0)
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
         // CHECK: return %[[TO_LAYOUT]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>}> : (tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0)  : (tensor<32x2048xbf16, #ttnn_layout_device_dram_tile_bf16>) -> tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
         return %0 : tensor<32x2048xbf16, #ttnn_layout_device_dram_rm_bf16>
     }
 
@@ -68,9 +64,8 @@ module attributes {} {
         // CHECK-LABEL: func.func @from_l1_sharded_tile_to_dram_rm_bf16
         // CHECK: %[[MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
         // CHECK: %[[TO_LAYOUT:.*]] = "ttnn.to_layout"(%[[MEM_CONFIG]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
         // CHECK: return %[[TO_LAYOUT]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>}> : (tensor<32x256xbf16, #ttnn_layout_device_l1_block_sharded_tile_bf16>) -> tensor<32x256xbf16, #ttnn_layout_device_dram_rm_bf16_small>
+        %0 = "ttnn.to_layout"(%arg0)  : (tensor<32x256xbf16, #ttnn_layout_device_l1_block_sharded_tile_bf16>) -> tensor<32x256xbf16, #ttnn_layout_device_dram_rm_bf16_small>
         return %0 : tensor<32x256xbf16, #ttnn_layout_device_dram_rm_bf16_small>
     }
 }

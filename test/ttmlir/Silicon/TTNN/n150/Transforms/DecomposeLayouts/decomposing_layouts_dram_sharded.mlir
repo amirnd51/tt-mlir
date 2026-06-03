@@ -1,4 +1,4 @@
-// RUN: ttmlir-opt --ttcore-register-device="system-desc-path=%system_desc_path%" --ttcore-mark-functions-as-forward --ttnn-decompose-layouts -o %t.mlir %s
+// RUN: ttmlir-opt --ttcore-register-device="system-desc-path=%system_desc_path%" --ttcore-mark-functions-as-forward --ttnn-decompose-layouts --mlir-print-local-scope -o %t.mlir %s
 // RUN: FileCheck %s --input-file=%t.mlir
 // RUN: ttmlir-translate --ttnn-to-flatbuffer -o %t.ttnn %t.mlir
 
@@ -43,13 +43,6 @@
 // L1-sharded to DRAM-sharded reshard test.
 #l1_bs_tile_bf16 = #ttnn.ttnn_layout<(d0, d1) -> (d0, d1), <1x6>, memref<1x2x!ttcore.tile<32x32, bf16>, #l1>, <block_sharded>, core_ranges = #ttnn.core_range_set<[#ttnn.core_range<(0,0), (5,0)>]>>
 
-// CHECK-DAG: #[[DRAM_WS_RM_BF16:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x12>, memref<32x32xbf16, #dram>, <width_sharded>, core_ranges = <[#ttnn.core_range<(0,0), (11,0)>]>>
-// CHECK-DAG: #[[DRAM_WS_RM_F32:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x12>, memref<32x32xf32, #dram>, <width_sharded>, core_ranges = <[#ttnn.core_range<(0,0), (11,0)>]>>
-// CHECK-DAG: #[[DRAM_WS_TILE_BF16:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x12>, memref<1x1x!ttcore.tile<32x32, bf16>, #dram>, <width_sharded>, core_ranges = <[#ttnn.core_range<(0,0), (11,0)>]>>
-// CHECK-DAG: #[[DRAM_WS_TILE_BF16_GRID6:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x6>, memref<1x2x!ttcore.tile<32x32, bf16>, #dram>, <width_sharded>, core_ranges = <[#ttnn.core_range<(0,0), (5,0)>]>>
-// CHECK-DAG: #[[DRAM_HS_RM_BF16:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<8x1>, memref<32x32xbf16, #dram>, <height_sharded>, core_ranges = <[#ttnn.core_range<(0,0), (7,0)>]>>
-// CHECK-DAG: #[[DRAM_IL_RM_BF16:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x1>, memref<32x384xbf16, #dram>, <interleaved>>
-// CHECK-DAG: #[[DRAM_IL_TILE_BF16:ttnn_layout[0-9]*]] = #ttnn.ttnn_layout<{{.*}}<1x1>, memref<1x12x!ttcore.tile<32x32, bf16>, #dram>, <interleaved>>
 
 module attributes {} {
 
@@ -63,11 +56,11 @@ module attributes {} {
     func.func @host_tile_bf16_to_dram_ws_rm_bf16(%arg0: tensor<32x384xbf16, #host_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_rm_bf16> {
         // CHECK-LABEL: func.func @host_tile_bf16_to_dram_ws_rm_bf16
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%arg0)
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xbf16, #host_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #host_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_rm_bf16>
     }
 
@@ -77,11 +70,11 @@ module attributes {} {
         // CHECK-LABEL: func.func @dram_ws_tile_bf16_to_dram_il_rm_bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%arg0)
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_IL_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x384xbf16, #ttnn.buffer_type<dram>>, <interleaved>>>
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <interleaved>>}> : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_il_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_il_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_il_rm_bf16>
     }
 
@@ -91,11 +84,11 @@ module attributes {} {
         // CHECK-LABEL: func.func @dram_ws_tile_bf16_to_dram_ws_rm_bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%arg0)
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_rm_bf16>
     }
 
@@ -105,9 +98,9 @@ module attributes {} {
         // CHECK-LABEL: func.func @dram_ws_tile_bf16_to_host_rm_bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%arg0)
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: return %[[UNTILIZE]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#system_memory>}> : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #host_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #host_rm_bf16>
         return %0 : tensor<32x384xbf16, #host_rm_bf16>
     }
 
@@ -118,11 +111,11 @@ module attributes {} {
         // CHECK-LABEL: func.func @dram_hs_tile_bf16_to_dram_hs_rm_bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%arg0)
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<256x32xbf16, #[[DRAM_HS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<256x32xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <height_sharded>, core_ranges = <
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <height_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (7, 0)>]>, <32x32>, <row_major>>>}> : (tensor<256x32xbf16, #dram_hs_tile_bf16>) -> tensor<256x32xbf16, #dram_hs_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<256x32xbf16, #dram_hs_tile_bf16>) -> tensor<256x32xbf16, #dram_hs_rm_bf16>
         return %0 : tensor<256x32xbf16, #dram_hs_rm_bf16>
     }
 
@@ -137,11 +130,11 @@ module attributes {} {
         // CHECK: %[[CAST:.*]] = "ttnn.typecast"(%arg0)
         // CHECK-SAME: -> tensor<{{.*}}bf16
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[CAST]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xf32, #host_tile_f32>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xf32, #host_tile_f32>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_rm_bf16>
     }
 
@@ -154,12 +147,12 @@ module attributes {} {
         // CHECK-SAME: -> tensor<{{.*}}bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%[[CAST]])
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK-NOT: ttnn.to_memory_config
         // CHECK: return %[[TO_DEV]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xf32, #dram_il_tile_f32>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xf32, #dram_il_tile_f32>) -> tensor<32x384xbf16, #dram_ws_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_rm_bf16>
     }
 
@@ -173,11 +166,11 @@ module attributes {} {
         // CHECK-SAME: -> tensor<{{.*}}bf16
         // CHECK: %[[FROM_DEV:.*]] = "ttnn.from_device"(%[[CAST]])
         // CHECK: %[[UNTILIZE:.*]] = "ttnn.to_layout"(%[[FROM_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<row_major>
+        // CHECK-SAME: memref<{{.*}}x{{.*}}, #ttnn.buffer_type
         // CHECK: "ttnn.to_device"(%[[UNTILIZE]]
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_IL_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x384xbf16, #ttnn.buffer_type<dram>>, <interleaved>>>
         // CHECK: return
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<row_major>, memory_config = #ttnn.memory_config<#dram, <interleaved>>}> : (tensor<32x384xf32, #dram_ws_tile_f32>) -> tensor<32x384xbf16, #dram_il_rm_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xf32, #dram_ws_tile_f32>) -> tensor<32x384xbf16, #dram_il_rm_bf16>
         return %0 : tensor<32x384xbf16, #dram_il_rm_bf16>
     }
 
@@ -191,12 +184,11 @@ module attributes {} {
     func.func @host_rm_bf16_to_dram_ws_tile_bf16(%arg0: tensor<32x384xbf16, #host_rm_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16> {
         // CHECK-LABEL: func.func @host_rm_bf16_to_dram_ws_tile_bf16
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_RM_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<32x32xbf16, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: %[[TILIZE:.*]] = "ttnn.to_layout"(%[[TO_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<tile>
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_TILE_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<1x1x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[TILIZE]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xbf16, #host_rm_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #host_rm_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_tile_bf16>
     }
 
@@ -209,13 +201,13 @@ module attributes {} {
     func.func @host_rm_f32_to_dram_ws_tile_bf16(%arg0: tensor<32x384xf32, #host_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16> {
         // CHECK-LABEL: func.func @host_rm_f32_to_dram_ws_tile_bf16
         // CHECK: %[[TO_DEV:.*]] = "ttnn.to_device"
-        // CHECK-SAME: -> tensor<32x384xf32, #[[DRAM_WS_RM_F32]]>
+        // CHECK-SAME: -> tensor<32x384xf32, #ttnn.ttnn_layout<{{.*}}memref<32x32xf32, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: %[[TILIZE:.*]] = "ttnn.to_layout"(%[[TO_DEV]])
-        // CHECK-SAME: layout = #ttnn.layout<tile>
+        // CHECK-SAME: !ttcore.tile<32x32,
         // CHECK: %[[CAST:.*]] = "ttnn.typecast"(%[[TILIZE]])
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_TILE_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<1x1x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[CAST]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xf32, #host_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xf32, #host_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_tile_bf16>
     }
 
@@ -225,13 +217,13 @@ module attributes {} {
     func.func @dram_il_rm_f32_to_dram_ws_tile_bf16(%arg0: tensor<32x384xf32, #dram_il_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16> {
         // CHECK-LABEL: func.func @dram_il_rm_f32_to_dram_ws_tile_bf16
         // CHECK: %[[TILIZE:.*]] = "ttnn.to_layout"(%arg0)
-        // CHECK-SAME: layout = #ttnn.layout<tile>
+        // CHECK-SAME: !ttcore.tile<32x32,
         // CHECK: %[[CAST:.*]] = "ttnn.typecast"(%[[TILIZE]])
         // CHECK-SAME: -> tensor<{{.*}}bf16
         // CHECK: %[[RESHARD:.*]] = "ttnn.to_memory_config"(%[[CAST]])
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_TILE_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<1x1x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK: return %[[RESHARD]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xf32, #dram_il_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xf32, #dram_il_rm_f32>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_tile_bf16>
     }
 
@@ -245,11 +237,11 @@ module attributes {} {
     func.func @dram_ws_tile_bf16_to_dram_il_tile_f32_unshards_before_typecast(%arg0: tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xf32, #dram_il_tile_f32> {
         // CHECK-LABEL: func.func @dram_ws_tile_bf16_to_dram_il_tile_f32_unshards_before_typecast
         // CHECK: %[[TO_MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_IL_TILE_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<1x12x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <interleaved>>>
         // CHECK-NEXT: %[[TYPECAST:.*]] = "ttnn.typecast"(%[[TO_MEM_CONFIG]])
         // CHECK-SAME: -> tensor<{{.*}}f32
         // CHECK-NEXT: return %[[TYPECAST]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <interleaved>>}> : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xf32, #dram_il_tile_f32>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xf32, #dram_il_tile_f32>
         return %0 : tensor<32x384xf32, #dram_il_tile_f32>
     }
 
@@ -258,11 +250,11 @@ module attributes {} {
     func.func @dram_ws_to_dram_ws_different_grid_emits_to_memory_config(%arg0: tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16_grid6> {
         // CHECK-LABEL: func.func @dram_ws_to_dram_ws_different_grid_emits_to_memory_config
         // CHECK: %[[TO_MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_TILE_BF16_GRID6]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}<1x6>, memref<1x2x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK-NOT: ttnn.to_layout
         // CHECK-NOT: ttnn.typecast
         // CHECK: return %[[TO_MEM_CONFIG]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (5, 0)>]>, <32x64>, <row_major>>>}> : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16_grid6>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #dram_ws_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16_grid6>
         return %0 : tensor<32x384xbf16, #dram_ws_tile_bf16_grid6>
     }
 
@@ -271,11 +263,11 @@ module attributes {} {
     func.func @l1_bs_to_dram_ws_emits_to_memory_config(%arg0: tensor<32x384xbf16, #l1_bs_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16> {
         // CHECK-LABEL: func.func @l1_bs_to_dram_ws_emits_to_memory_config
         // CHECK: %[[TO_MEM_CONFIG:.*]] = "ttnn.to_memory_config"(%arg0)
-        // CHECK-SAME: -> tensor<32x384xbf16, #[[DRAM_WS_TILE_BF16]]>
+        // CHECK-SAME: -> tensor<32x384xbf16, #ttnn.ttnn_layout<{{.*}}memref<1x1x!ttcore.tile<32x32, bf16>, #ttnn.buffer_type<dram>>, <width_sharded>, core_ranges = <
         // CHECK-NOT: ttnn.to_layout
         // CHECK-NOT: ttnn.typecast
         // CHECK: return %[[TO_MEM_CONFIG]]
-        %0 = "ttnn.to_layout"(%arg0) <{layout = #ttnn.layout<tile>, memory_config = #ttnn.memory_config<#dram, <width_sharded>, #ttnn.shard_spec<<[#ttnn.core_range<(0, 0), (11, 0)>]>, <32x32>, <row_major>>>}> : (tensor<32x384xbf16, #l1_bs_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
+        %0 = "ttnn.to_layout"(%arg0) : (tensor<32x384xbf16, #l1_bs_tile_bf16>) -> tensor<32x384xbf16, #dram_ws_tile_bf16>
         return %0 : tensor<32x384xbf16, #dram_ws_tile_bf16>
     }
 }

@@ -511,7 +511,7 @@ public:
         emitter.emit(constantOp.getValue()),
         emitter.emit(constantOp.getResult().getType().getShape()),
         emitter.emit(constantOp.getDtypeAttr()),
-        emitter.emit(constantOp.getLayout()),
+        emitter.emit(constantOp.getLayoutAttr().getValue()),
     };
 
     if (constantOp.getDevice()) {
@@ -1219,7 +1219,7 @@ public:
                                    : emitter.emit(std::nullopt);
     llvm::SmallVector<mlir::Attribute> args{
         emitter.emit(toLayoutOp.getInput()),
-        emitter.emit(toLayoutOp.getLayout()),
+        emitter.emit(toLayoutOp.getLayoutAttr()),
         dtypeArg,
         emitter.emit(toLayoutOp.getMemoryConfigAttr(), "memory_config"),
     };
@@ -1284,7 +1284,7 @@ public:
         emitter.emit(srcOp.getStep()),
         emitter.emit(srcOp.getDtypeAttr(), "dtype"),
         emitter.emit(srcOp.getDevice(), "device"),
-        emitter.emit(srcOp.getLayout(), "layout"),
+        emitter.emit(srcOp.getLayoutAttr().getValue(), "layout"),
         emitter.emit(srcOp.getMemoryConfigAttr(), "memory_config"),
     };
 
@@ -1315,7 +1315,7 @@ public:
     llvm::SmallVector<mlir::Attribute> args{
         emitter.emit(srcOp.getShape()),
         emitter.emit(srcOp.getDtypeAttr()),
-        emitter.emit(srcOp.getLayout()),
+        emitter.emit(srcOp.getLayoutAttr().getValue()),
         emitter.emit(srcOp.getDevice()),
         emitter.emit(srcOp.getMemoryConfigAttr()),
     };
@@ -1367,7 +1367,7 @@ private:
         emitter.emit(fullOp.getShape(), "shape"),
         emitter.emit(fillValue, "fill_value"),
         emitter.emit(fullOp.getDtypeAttr(), "dtype"),
-        emitter.emit(fullOp.getLayout(), "layout"),
+        emitter.emit(fullOp.getLayoutAttr().getValue(), "layout"),
         emitter.emit(fullOp.getDevice(), "device"),
         emitter.emit(fullOp.getMemoryConfigAttr(), "memory_config"),
     };
@@ -1401,7 +1401,7 @@ public:
     llvm::SmallVector<mlir::Attribute> args{
         emitter.emit(namedFullOp.getShape(), "shape"),
         emitter.emit(namedFullOp.getDtypeAttr(), "dtype"),
-        emitter.emit(namedFullOp.getLayout(), "layout"),
+        emitter.emit(namedFullOp.getLayoutAttr().getValue(), "layout"),
         emitter.emit(namedFullOp.getDevice(), "device"),
         emitter.emit(namedFullOp.getMemoryConfigAttr(), "memory_config"),
     };
@@ -1433,7 +1433,7 @@ public:
         emitter.emit(srcOp.getSize()),
         emitter.emit(srcOp.getDevice()),
         emitter.emit(srcOp.getDtypeAttr(), "dtype"),
-        emitter.emit(srcOp.getLayout(), "layout"),
+        emitter.emit(srcOp.getLayoutAttr().getValue(), "layout"),
         emitter.emit(srcOp.getMemoryConfigAttr(), "memory_config"),
         emitter.emit(srcOp.getLow(), "low"),
         emitter.emit(srcOp.getHigh(), "high"),
