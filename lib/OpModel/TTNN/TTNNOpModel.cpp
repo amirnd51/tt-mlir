@@ -26,9 +26,9 @@
 #include "ttmlir/OpInvoke/TTNN/Eltwise/Unary/EltwiseUnaryOp.h"
 #include "ttmlir/OpInvoke/TTNN/Matmul/MatmulOp.h"
 #include "ttmlir/OpInvoke/TTNN/Transformer/ConcatenateHeadsOp.h"
-#include "ttmlir/OpInvoke/TTNN/Transformer/NlpConcatHeadsDecodeOp.h"
-#include "ttmlir/OpInvoke/TTNN/Transformer/NlpConcatHeadsOp.h"
-#include "ttmlir/OpInvoke/TTNN/Transformer/NlpCreateQKVHeadsDecodeOp.h"
+#include "ttmlir/OpInvoke/TTNN/Transformer/NLPConcatHeadsDecodeOp.h"
+#include "ttmlir/OpInvoke/TTNN/Transformer/NLPConcatHeadsOp.h"
+#include "ttmlir/OpInvoke/TTNN/Transformer/NLPCreateQKVHeadsDecodeOp.h"
 #include "ttmlir/OpInvoke/TTNN/Transformer/PagedFlashMultiLatentAttentionDecodeOp.h"
 #include "ttmlir/OpInvoke/TTNN/Transformer/PagedScaledDotProductAttentionDecodeOp.h"
 #include "ttmlir/OpInvoke/TTNN/Transformer/RotaryEmbeddingLlamaOp.h"
@@ -2964,10 +2964,10 @@ llvm::Expected<OpConstraints> OpModel<ConcatenateHeadsOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected ConcatenateHeadsOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected ConcatenateHeadsOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -2996,8 +2996,7 @@ OpModel<ConcatenateHeadsOp>::getOpRuntime(llvm::ArrayRef<int64_t> inputShape,
   auto concatenateHeadsOpQuery = [=]() {
     ttnn_op_invoke::ConcatenateHeadsOpResult result =
         ttnn_op_invoke::callConcatenateHeads(
-            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec,
-            device);
+            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec, device);
 
     LOG_ASSERT(
         std::holds_alternative<::ttnn::graph::RuntimeQueryResponse>(result),
@@ -3576,10 +3575,10 @@ OpModel<ScaledDotProductAttentionOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, querySpec,
             keySpec, valueSpec, attentionMaskSpec, attentionSinkSpec, device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected ScaledDotProductAttentionOp constraints query to "
-               "return ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected ScaledDotProductAttentionOp constraints query to "
+        "return ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -3689,10 +3688,10 @@ llvm::Expected<OpConstraints> OpModel<RotaryEmbeddingLlamaOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             cosSpec, sinSpec, transMatSpec, device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected RotaryEmbeddingLlamaOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected RotaryEmbeddingLlamaOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -3789,10 +3788,10 @@ llvm::Expected<OpConstraints> OpModel<RotaryEmbeddingOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             cosSpec, sinSpec, device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected RotaryEmbeddingOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected RotaryEmbeddingOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -3909,10 +3908,10 @@ OpModel<NLPCreateQKVHeadsDecodeOp>::getOpConstraints(
                 : std::nullopt,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected NLPCreateQKVHeadsDecodeOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected NLPCreateQKVHeadsDecodeOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -4022,10 +4021,10 @@ OpModel<SplitQueryKeyValueAndSplitHeadsOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             inputKVSpec, device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected SplitQueryKeyValueAndSplitHeadsOp constraints query "
-               "to return ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected SplitQueryKeyValueAndSplitHeadsOp constraints query "
+        "to return ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -4093,9 +4092,10 @@ buildNLPConcatHeadsOpTFromMLIR(TTNNLayoutAttr outputLayout) {
 }
 #endif // TTMLIR_ENABLE_OPMODEL
 
-llvm::Expected<OpConstraints> OpModel<NLPConcatHeadsOp>::getOpConstraints(
-    ttcore::GridAttr deviceGrid, llvm::ArrayRef<int64_t> inputShape,
-    TTNNLayoutAttr inputLayout, TTNNLayoutAttr outputLayout) {
+llvm::Expected<OpConstraints>
+OpModel<NLPConcatHeadsOp>::getOpConstraints(llvm::ArrayRef<int64_t> inputShape,
+                                            TTNNLayoutAttr inputLayout,
+                                            TTNNLayoutAttr outputLayout) {
 #ifdef TTMLIR_ENABLE_OPMODEL
   ::tt::tt_metal::distributed::MeshDevice *device =
       SingletonDeviceContext::getInstance().getDevice();
@@ -4113,10 +4113,10 @@ llvm::Expected<OpConstraints> OpModel<NLPConcatHeadsOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected NLPConcatHeadsOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected NLPConcatHeadsOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -4145,8 +4145,7 @@ OpModel<NLPConcatHeadsOp>::getOpRuntime(llvm::ArrayRef<int64_t> inputShape,
   auto nlpConcatHeadsOpQuery = [=]() {
     ttnn_op_invoke::NLPConcatHeadsOpResult result =
         ttnn_op_invoke::callNLPConcatHeads(
-            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec,
-            device);
+            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec, device);
 
     LOG_ASSERT(
         std::holds_alternative<::ttnn::graph::RuntimeQueryResponse>(result),
@@ -4196,10 +4195,10 @@ llvm::Expected<OpConstraints> OpModel<NLPConcatHeadsDecodeOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, inputSpec,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected NLPConcatHeadsDecodeOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected NLPConcatHeadsDecodeOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -4227,8 +4226,7 @@ llvm::Expected<size_t> OpModel<NLPConcatHeadsDecodeOp>::getOpRuntime(
   auto nlpConcatHeadsDecodeOpQuery = [=]() {
     ttnn_op_invoke::NLPConcatHeadsDecodeOpResult result =
         ttnn_op_invoke::callNLPConcatHeadsDecode(
-            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec,
-            device);
+            ttnn_op_invoke::CallType::QUERY_OP_RUNTIME, opT, inputSpec, device);
 
     LOG_ASSERT(
         std::holds_alternative<::ttnn::graph::RuntimeQueryResponse>(result),
@@ -5855,10 +5853,10 @@ llvm::Expected<OpConstraints> OpModel<Conv3dOp>::getOpConstraints(
             : std::nullopt,
         device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected Conv3dOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected Conv3dOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -6037,10 +6035,10 @@ llvm::Expected<OpConstraints> OpModel<ConvTranspose2dOp>::getOpConstraints(
                 : std::nullopt,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected ConvTranspose2dOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected ConvTranspose2dOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -6227,10 +6225,10 @@ llvm::Expected<OpConstraints> OpModel<PrepareConv2dWeightsOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, &weightTensor,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected PrepareConv2dWeightsOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected PrepareConv2dWeightsOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -6327,14 +6325,14 @@ llvm::Expected<OpConstraints> OpModel<PrepareConv2dBiasOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, &biasTensor,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected PrepareConv2dBiasOp constraints query to return "
-               "ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected PrepareConv2dBiasOp constraints query to return "
+        "ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
-  return operation::getOpConstraints(biasLayout.getContext(), deviceGrid,
+  return operation::getOpConstraints(biasLayout.getContext(),
                                      prepareConv2dBiasQuery);
 #else
   return OpConstraints{};
@@ -6441,10 +6439,10 @@ OpModel<PrepareConvTranspose2dWeightsOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, &weightTensor,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected PrepareConvTranspose2dWeightsOp constraints query to "
-               "return ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected PrepareConvTranspose2dWeightsOp constraints query to "
+        "return ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 
@@ -6549,10 +6547,10 @@ OpModel<PrepareConvTranspose2dBiasOp>::getOpConstraints(
             ttnn_op_invoke::CallType::QUERY_OP_CONSTRAINTS, opT, &biasTensor,
             device);
 
-    LOG_ASSERT(std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(
-                   result),
-               "Expected PrepareConvTranspose2dBiasOp constraints query to "
-               "return ConstraintQueryResponse");
+    LOG_ASSERT(
+        std::holds_alternative<::ttnn::graph::ConstraintQueryResponse>(result),
+        "Expected PrepareConvTranspose2dBiasOp constraints query to "
+        "return ConstraintQueryResponse");
     return std::get<::ttnn::graph::ConstraintQueryResponse>(result);
   };
 

@@ -82,12 +82,14 @@ inline auto resolveTensorArg(TensorArg arg, ExecuteTag callType) {
                                   std::forward<decltype(args)>(args)...);      \
         },                                                                     \
         makeTuple(QueryTag{}));                                                \
-  case CallType::EXECUTE:                                                      \
+  case CallType::EXECUTE: {                                                    \
+    auto executeTuple = makeTuple(ExecuteTag{});                               \
     return std::apply(                                                         \
         [&](auto &&...args) {                                                  \
           return op(std::forward<decltype(args)>(args)...);                    \
         },                                                                     \
-        makeTuple(ExecuteTag{}));                                              \
+        executeTuple);                                                         \
+  }                                                                            \
   }                                                                            \
   llvm_unreachable("unhandled CallType");
 
