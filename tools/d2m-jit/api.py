@@ -10,7 +10,7 @@ from ttmlir.ir import *
 from ttmlir.dialects import d2m, ttcore, arith, linalg
 
 from ._src.utils import _asindex
-from ._src.ast import D2MCompiler, syntax
+from ._src.ast import syntax
 from ._src.config import config
 from ._src.errors import D2mJitError
 from ._src.tensor_layout import Layout, float32, float16, bfloat16, _to_data_type
@@ -29,9 +29,6 @@ from ._src.builder import (
     view,
     permute,
     to_host,
-    _REDUCE_MEAN_SCALER_ARG,
-    _REDUCE_UNIT_SCALER_ARG,
-    reduce_mean_collapse_scaler_arg_name,
 )
 from ._src.rewrite import (
     pattern,
@@ -657,7 +654,7 @@ def reduce_sum(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_sum(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        _REDUCE_UNIT_SCALER_ARG,
+        1.0,
         0.0,
     )
 
@@ -673,7 +670,7 @@ def reduce_max(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_max(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        _REDUCE_UNIT_SCALER_ARG,
+        1.0,
         float("-inf"),
     )
 
@@ -689,7 +686,7 @@ def reduce_mean(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_mean(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        _REDUCE_MEAN_SCALER_ARG,
+        1.0 / 32.0,
         0.0,
     )
 
@@ -706,7 +703,7 @@ def reduce_sum_collapse(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_sum(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        _REDUCE_UNIT_SCALER_ARG,
+        1.0,
         0.0,
         collapse=True,
     )
@@ -719,7 +716,7 @@ def reduce_max_collapse(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_max(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        _REDUCE_UNIT_SCALER_ARG,
+        1.0,
         float("-inf"),
         collapse=True,
     )
@@ -735,7 +732,7 @@ def reduce_mean_collapse(input, dim):
         lambda a, b, c, reduce_dim: d2m.tile_reduce_mean(a.type, a, b, c, reduce_dim),
         input,
         dim,
-        reduce_mean_collapse_scaler_arg_name(reduce_axis, tile_count),
+        1.0 / (32.0 * tile_count),
         0.0,
         collapse=True,
     )
@@ -1246,39 +1243,6 @@ def _tile_fill_float(tile_type, value):
     return d2m.tile_fill(tile_type, scalar)
 
 
-def _get_reduce_scaler_block(input_block, scaler_arg_name):
-    compiler = D2MCompiler.current()
-    if compiler is None:
-        raise RuntimeError(
-            "reduce_sum/reduce_max/reduce_mean can only be used inside @kernel"
-        )
-
-    key = (
-        scaler_arg_name,
-        str(input_block.type.element_type),
-        id(InsertionPoint.current.block),
-    )
-    cached = compiler.reduce_scaler_cache.get(key)
-    if cached is not None:
-        return cached
-
-    scaler = compiler.get_synthetic_reduce_scaler(
-        scaler_arg_name, input_block.type.element_type
-    )
-    if scaler is None:
-        raise RuntimeError("internal error: missing synthetic reduction scaler")
-
-    zero = arith.ConstantOp(IndexType.get(scaler.context), 0).result
-    scaler_block = remote_load(scaler, [zero, zero])
-    if scaler_block.type.element_type != input_block.type.element_type:
-        raise TypeError(
-            "reduction scaler tile type mismatch: "
-            f"{scaler_block.type.element_type} vs {input_block.type.element_type}"
-        )
-    compiler.reduce_scaler_cache[key] = scaler_block
-    return scaler_block
-
-
 def _collapse_input_map(rank, reduce_axis, reduce_index):
     exprs = []
     for axis in range(rank):
@@ -1292,7 +1256,7 @@ def _collapse_input_map(rank, reduce_axis, reduce_index):
 def _reduce_block_collapse_explicit(
     tile_op_fn,
     input,
-    scaler,
+    scaler_value,
     reduce_axis,
     reduce_dim,
     identity_value,
@@ -1307,31 +1271,28 @@ def _reduce_block_collapse_explicit(
 
     tile_count = block_ty.shape[reduce_axis]
     zero = AffineConstantExpr.get(0)
-    scaler_rank = scaler.type.rank
     indexing_maps = [
         AffineMapAttr.get(_collapse_input_map(rank, reduce_axis, reduce_index))
         for reduce_index in range(tile_count)
     ]
-    indexing_maps.append(
-        AffineMapAttr.get(AffineMap.get(rank, 0, [zero] * scaler_rank))
-    )
     indexing_maps.append(AffineMapAttr.get(AffineMap.get_identity(rank)))
 
     parallel = Attribute.parse("#linalg.iterator_type<parallel>")
     generic = linalg.GenericOp(
         [output_ty],
-        [input] * tile_count + [scaler],
+        [input] * tile_count,
         [output],
         ArrayAttr.get(indexing_maps),
         ArrayAttr.get([parallel] * rank),
     )
     body = Block.create_at_start(
         generic.regions[0],
-        [elem_ty] * (tile_count + 2),
-        [Location.unknown()] * (tile_count + 2),
+        [elem_ty] * (tile_count + 1),
+        [Location.unknown()] * (tile_count + 1),
     )
     with InsertionPoint(body):
-        *input_tiles, scaler_tile, _ = body.arguments
+        *input_tiles, _ = body.arguments
+        scaler_tile = _tile_fill_float(elem_ty, scaler_value)
         accumulator = _tile_fill_float(elem_ty, identity_value)
         for input_tile in input_tiles:
             accumulator = tile_op_fn(input_tile, scaler_tile, accumulator, reduce_dim)
@@ -1342,9 +1303,7 @@ def _reduce_block_collapse_explicit(
     return generic.result
 
 
-def _reduce_block(
-    tile_op_fn, input, dim, scaler_arg_name, identity_value, collapse=False
-):
+def _reduce_block(tile_op_fn, input, dim, scaler_value, identity_value, collapse=False):
     """Wrap a float d2m.tile_reduce_* op in a per-block linalg.generic.
 
     Non-collapsed reductions keep the same block shape as `input` and reduce
@@ -1359,13 +1318,12 @@ def _reduce_block(
     elem_ty = block_ty.element_type
     reduce_axis = _normalize_reduce_axis(dim, rank)
     reduce_dim = _dim_to_reduce_dim_attr(dim)
-    scaler = _get_reduce_scaler_block(input, scaler_arg_name)
 
     if collapse and block_ty.shape[reduce_axis] > 1:
         return _reduce_block_collapse_explicit(
             tile_op_fn,
             input,
-            scaler,
+            scaler_value,
             reduce_axis,
             reduce_dim,
             identity_value,
@@ -1374,12 +1332,9 @@ def _reduce_block(
     output_ty = block_ty
     output = d2m.empty(output_ty)
     identity = AffineMap.get_identity(rank)
-    zero = AffineConstantExpr.get(0)
-    scaler_map = AffineMap.get(rank, 0, [zero, zero])
     indexing_maps = ArrayAttr.get(
         [
             AffineMapAttr.get(identity),
-            AffineMapAttr.get(scaler_map),
             AffineMapAttr.get(identity),
         ]
     )
@@ -1388,18 +1343,19 @@ def _reduce_block(
 
     generic = linalg.GenericOp(
         [output_ty],
-        [input, scaler],
+        [input],
         [output],
         indexing_maps,
         iterator_types,
     )
     body = Block.create_at_start(
         generic.regions[0],
-        [elem_ty, elem_ty, elem_ty],
-        [Location.unknown()] * 3,
+        [elem_ty, elem_ty],
+        [Location.unknown()] * 2,
     )
     with InsertionPoint(body):
-        input_tile, scaler_tile, _ = body.arguments
+        input_tile, _ = body.arguments
+        scaler_tile = _tile_fill_float(elem_ty, scaler_value)
         accumulator = _tile_fill_float(elem_ty, identity_value)
         result = tile_op_fn(input_tile, scaler_tile, accumulator, reduce_dim)
         if hasattr(result, "result"):

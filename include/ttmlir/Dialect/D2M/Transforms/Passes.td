@@ -53,6 +53,28 @@ def D2MInsertScratchBuffers : Pass<"d2m-insert-scratch-buffers", "::mlir::Module
   ];
 }
 
+def D2MMaterializeReductionScalers : Pass<"d2m-materialize-reduction-scalers", "::mlir::ModuleOp"> {
+  let summary = "Materialize tile_fill reduction scalers as CB-backed local buffers.";
+  let description = [{
+    This pass runs after bufferization and rewrites `d2m.tile_reduce_*` scaler
+    operands produced by `d2m.tile_fill` into explicit local buffers. The scaler
+    buffer has the same shard shape as the reduction output, avoiding special
+    shape handling in downstream DST packing analysis.
+
+    The pass does not emit TTKernel `pack_tile` directly. It creates a normal
+    linalg producer/consumer relationship over an L1 memref, which the existing
+    synchronization, allocation, hoisting, and D2M-to-TTKernel conversion passes
+    lower to CB reserve/push/wait/pop and `ttkernel.pack_tile`.
+  }];
+
+  let dependentDialects = [
+    "::mlir::tt::d2m::D2MDialect",
+    "::mlir::arith::ArithDialect",
+    "::mlir::linalg::LinalgDialect",
+    "::mlir::memref::MemRefDialect"
+  ];
+}
+
 // Fusion of d2m.generic ops on tensors (elementwise, eltwise->reduction).
 def D2MGenericFusion : Pass<"d2m-generic-fusion", "::mlir::ModuleOp"> {
   let summary = "Fuse compute-only d2m.generic ops (elementwise and eltwise->reduction)";
