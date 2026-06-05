@@ -18,8 +18,7 @@ namespace mlir::tt::d2m {
 
 namespace {
 
-constexpr llvm::StringLiteral kMaterializedReductionScalerAttr =
-    "d2m.materialized_reduction_scaler";
+constexpr llvm::StringLiteral kReductionScalerAttr = "d2m.reduction_scaler";
 
 static bool containsAccumulatingCompute(Operation *op) {
   if (isa<d2m::TileMatmulOp, d2m::TileMatmulBlockOp, d2m::TileReduceSumOp,
@@ -55,8 +54,7 @@ public:
       for (auto &[cb, usageInfo] : cbUsageInfo) {
         if (auto allocOp =
                 mlir::dyn_cast<memref::AllocOp>(cb.getDefiningOp())) {
-          bool forceHoistedCB =
-              allocOp->hasAttr(kMaterializedReductionScalerAttr);
+          bool forceHoistedCB = allocOp->hasAttr(kReductionScalerAttr);
           int32_t bufferCount = numStreamBuffers;
           if (forceHoistedCB) {
             bufferCount = 1;

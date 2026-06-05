@@ -39,6 +39,7 @@ from ._src.rewrite import (
 )
 
 TileBcastType = d2m.TileBcastType
+_REDUCTION_SCALER_ATTR = "d2m.reduction_scaler"
 
 
 def _parse_tile_bcast_type(value):
@@ -1253,6 +1254,34 @@ def _collapse_input_map(rank, reduce_axis, reduce_index):
     return AffineMap.get(rank, 0, exprs)
 
 
+def _reduction_scaler_block(output_ty, scaler_value):
+    rank = output_ty.rank
+    elem_ty = output_ty.element_type
+    output = d2m.empty(output_ty)
+    output.owner.attributes[_REDUCTION_SCALER_ATTR] = UnitAttr.get(output.context)
+    identity = AffineMap.get_identity(rank)
+    parallel = Attribute.parse("#linalg.iterator_type<parallel>")
+    iterator_types = ArrayAttr.get([parallel] * rank)
+
+    generic = linalg.GenericOp(
+        [output_ty],
+        [],
+        [output],
+        ArrayAttr.get([AffineMapAttr.get(identity)]),
+        iterator_types,
+    )
+    body = Block.create_at_start(
+        generic.regions[0],
+        [elem_ty],
+        [Location.unknown()],
+    )
+    with InsertionPoint(body):
+        scaler_tile = _tile_fill_float(elem_ty, scaler_value)
+        linalg.yield_([scaler_tile])
+
+    return generic.result
+
+
 def _reduce_block_collapse_explicit(
     tile_op_fn,
     input,
@@ -1268,31 +1297,31 @@ def _reduce_block_collapse_explicit(
     output_shape[reduce_axis] = 1
     output_ty = RankedTensorType.get(output_shape, elem_ty)
     output = d2m.empty(output_ty)
+    scaler = _reduction_scaler_block(output_ty, scaler_value)
 
     tile_count = block_ty.shape[reduce_axis]
-    zero = AffineConstantExpr.get(0)
     indexing_maps = [
         AffineMapAttr.get(_collapse_input_map(rank, reduce_axis, reduce_index))
         for reduce_index in range(tile_count)
     ]
     indexing_maps.append(AffineMapAttr.get(AffineMap.get_identity(rank)))
+    indexing_maps.append(AffineMapAttr.get(AffineMap.get_identity(rank)))
 
     parallel = Attribute.parse("#linalg.iterator_type<parallel>")
     generic = linalg.GenericOp(
         [output_ty],
-        [input] * tile_count,
+        [input] * tile_count + [scaler],
         [output],
         ArrayAttr.get(indexing_maps),
         ArrayAttr.get([parallel] * rank),
     )
     body = Block.create_at_start(
         generic.regions[0],
-        [elem_ty] * (tile_count + 1),
-        [Location.unknown()] * (tile_count + 1),
+        [elem_ty] * (tile_count + 2),
+        [Location.unknown()] * (tile_count + 2),
     )
     with InsertionPoint(body):
-        *input_tiles, _ = body.arguments
-        scaler_tile = _tile_fill_float(elem_ty, scaler_value)
+        *input_tiles, scaler_tile, _ = body.arguments
         accumulator = _tile_fill_float(elem_ty, identity_value)
         for input_tile in input_tiles:
             accumulator = tile_op_fn(input_tile, scaler_tile, accumulator, reduce_dim)
@@ -1331,9 +1360,11 @@ def _reduce_block(tile_op_fn, input, dim, scaler_value, identity_value, collapse
 
     output_ty = block_ty
     output = d2m.empty(output_ty)
+    scaler = _reduction_scaler_block(output_ty, scaler_value)
     identity = AffineMap.get_identity(rank)
     indexing_maps = ArrayAttr.get(
         [
+            AffineMapAttr.get(identity),
             AffineMapAttr.get(identity),
             AffineMapAttr.get(identity),
         ]
@@ -1343,19 +1374,18 @@ def _reduce_block(tile_op_fn, input, dim, scaler_value, identity_value, collapse
 
     generic = linalg.GenericOp(
         [output_ty],
-        [input],
+        [input, scaler],
         [output],
         indexing_maps,
         iterator_types,
     )
     body = Block.create_at_start(
         generic.regions[0],
-        [elem_ty, elem_ty],
-        [Location.unknown()] * 2,
+        [elem_ty, elem_ty, elem_ty],
+        [Location.unknown()] * 3,
     )
     with InsertionPoint(body):
-        input_tile, _ = body.arguments
-        scaler_tile = _tile_fill_float(elem_ty, scaler_value)
+        input_tile, scaler_tile, _ = body.arguments
         accumulator = _tile_fill_float(elem_ty, identity_value)
         result = tile_op_fn(input_tile, scaler_tile, accumulator, reduce_dim)
         if hasattr(result, "result"):

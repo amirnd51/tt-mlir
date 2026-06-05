@@ -26,8 +26,7 @@ namespace mlir::tt::d2m {
 
 namespace {
 
-constexpr llvm::StringLiteral kMaterializedReductionScalerAttr =
-    "d2m.materialized_reduction_scaler";
+constexpr llvm::StringLiteral kReductionScalerAttr = "d2m.reduction_scaler";
 
 /// Information about one scratch_space_loop "region of compute".
 /// Records enough structural information to:
@@ -191,7 +190,7 @@ collectScratchSpaceLoops(GenericOp genericOp) {
 /// Inputs/outputs of the generic already have externally visible storage and
 /// should never be replaced by scratch slots.
 static bool isIntermediateAlloc(memref::AllocOp allocOp, GenericOp genericOp) {
-  if (allocOp->hasAttr(kMaterializedReductionScalerAttr)) {
+  if (allocOp->hasAttr(kReductionScalerAttr)) {
     return false;
   }
 

@@ -24,8 +24,7 @@ namespace mlir::tt::d2m {
 
 namespace {
 
-constexpr llvm::StringLiteral kMaterializedReductionScalerAttr =
-    "d2m.materialized_reduction_scaler";
+constexpr llvm::StringLiteral kReductionScalerAttr = "d2m.reduction_scaler";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -54,8 +53,7 @@ Value traceComputeMemrefToCB(Value value, GenericOp genericOp) {
         if (definingOp && definingOp->getAttr("d2m.scratch_buffer")) {
           return nullptr;
         }
-        if (definingOp &&
-            definingOp->hasAttr(kMaterializedReductionScalerAttr)) {
+        if (definingOp && definingOp->hasAttr(kReductionScalerAttr)) {
           return nullptr;
         }
         return value;

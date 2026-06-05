@@ -19,7 +19,6 @@ add_mlir_dialect_library(MLIRD2MTransforms
         LowerScratchAllocate.cpp
         LowerToLayout/LowerToLayout.cpp
         LowerToLayout/Plan.cpp
-        MaterializeReductionScalers.cpp
         MaterializeViewReturns.cpp
         OptimizeMasks.cpp
         OpScheduler.cpp

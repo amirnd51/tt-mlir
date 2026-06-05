@@ -133,7 +133,6 @@ _PIPELINE = ",".join(
         "canonicalize",
         "ttir-bufferization-pipeline",
         "d2m-insert-scratch-buffers",
-        "d2m-materialize-reduction-scalers",
         "d2m-generic-apply-interchange",
         "d2m-generate-outer-loops",
         "d2m-mark-synchronized-buffers",
