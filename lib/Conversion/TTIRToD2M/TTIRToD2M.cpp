@@ -802,6 +802,22 @@ protected:
     SmallVector<Value> origInputs;
     SmallVector<Value> origOutputs =
         createDpsOutputs(loc, rewriter, {resultType});
+    // MOLA local patch (2026-06-06): a constant fill's result feeds device
+    // compute as an INPUT, so place it in the input-role memory space, not
+    // the output role. With MOLA's dram-input/l1-output split the old
+    // output-role (L1) placement forced a device-side L1 -> logical -> DRAM
+    // restage between the fill and its consumer, and that intermediate
+    // restage silently produces wrong data (consumer degenerates to a
+    // passthrough; arg-fed matmuls staged dram-direct are exact). Routing
+    // the fill straight to the input space removes the broken roundtrip.
+    if (mlir::Operation *def = origOutputs.front().getDefiningOp()) {
+      def->setAttr("mola.memspace",
+                   mlir::StringAttr::get(
+                       rewriter.getContext(),
+                       memorySpaces[0] == ttcore::MemorySpace::DeviceL1
+                           ? "l1"
+                           : "dram"));
+    }
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true);
     assert(outputs.size() == 1);
