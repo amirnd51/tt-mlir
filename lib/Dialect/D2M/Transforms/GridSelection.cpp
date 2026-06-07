@@ -976,6 +976,56 @@ public:
     if (failed(planTopKPlacements(module))) {
       signalPassFailure();
       return;
+      }
+
+    // MOLA local patch (2026-06-07): cross-generic producer/consumer grid
+    // harmonization. Each generic's grids are anchored on its own output,
+    // so a single-use staging producer (constant fill, get_global tilize)
+    // can land on a different grid than its consumer's operand — the same
+    // DRAM buffer then gets written shard-order A and read shard-order B,
+    // silently degrading the consumer to an input passthrough (one-hot
+    // probes show out==in verbatim). Re-anchor such producers: when a
+    // generic's input operand is produced by a single-use generic whose
+    // output grid differs, rebuild the producer with the consumer's grid.
+    SmallVector<d2m::GenericOp> consumers;
+    module.walk(
+        [&](d2m::GenericOp genericOp) { consumers.push_back(genericOp); });
+    OpBuilder builder(module.getContext());
+    for (auto consumer : consumers) {
+      for (Value operand : consumer.getInputs()) {
+        auto producer = operand.getDefiningOp<d2m::GenericOp>();
+        if (!producer || !operand.hasOneUse())
+          continue;
+        auto opType = mlir::cast<RankedTensorType>(operand.getType());
+        auto layout =
+            mlir::dyn_cast<ttcore::MetalLayoutAttr>(opType.getEncoding());
+        if (!layout)
+          continue;
+        ArrayRef<int64_t> prodGrid = layout.getGridShape(opType);
+        ArrayRef<int64_t> consGrid = consumer.getGrid().getShape();
+        if (prodGrid.size() != consGrid.size() ||
+            llvm::equal(prodGrid, consGrid))
+          continue;
+        // Verify the consumer grid divides the producer output tiles.
+        SmallVector<int64_t> tiles(prodGrid.size());
+        ArrayRef<int64_t> shard = layout.getShardShape(opType);
+        bool divides = true;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+          tiles[i] = prodGrid[i] * shard[i];
+          divides &= (consGrid[i] != 0) && (tiles[i] % consGrid[i] == 0);
+        }
+        if (!divides)
+          continue;
+        ttcore::GridAttr newGrid =
+            ttcore::GridAttr::get(module.getContext(), consGrid);
+        builder.setInsertionPoint(producer);
+        auto ret = producer.withParallelization(builder, newGrid, std::nullopt,
+                                                /*generateReturnView=*/false);
+        if (failed(ret))
+          continue;
+        producer->replaceAllUsesWith(ret->genericOp);
+        producer.erase();
+      }
     }
   }
 
