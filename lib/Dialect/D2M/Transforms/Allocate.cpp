@@ -13,6 +13,7 @@
 #include "ttmlir/Utils.h"
 
 #include "mlir/Analysis/Liveness.h"
+#include <cstdlib>
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
@@ -572,6 +573,18 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
 
         Operation *firstOp = li->getStartOperation(result);
         Operation *lastOp = li->getEndOperation(result, firstOp);
+        // MOLA local patch (2026-06-07): address reuse across staged
+        // buffers within one program corrupts every program with 2+
+        // matmuls. Until root-caused, extend every alloc live range to
+        // the terminator so the planner never recycles addresses.
+        // Opt out with MOLA_TT_ALLOC_REUSE=1.
+        static const bool noReuse = [] {
+          const char *e = ::getenv("MOLA_TT_ALLOC_REUSE");
+          return e && e[0] == '1' ? false : (e && e[0] == '2');
+        }();
+        if (noReuse) {
+          lastOp = funcBody.getTerminator();
+        }
 
         LivenessClosure &closure = livenessJoinGraph[op];
         closure.lastOp = lastOp;
