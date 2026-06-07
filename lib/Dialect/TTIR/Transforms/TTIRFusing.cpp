@@ -3054,6 +3054,7 @@ public:
       patterns.add<ReshapeBroadcastReshapeToRepeatPattern>(&getContext());
       patterns.add<fusing::RoPERotateHalfFusingPattern>(&getContext());
       patterns.add<fusing::RoPEComplexRotationFusingPattern>(&getContext());
+      patterns.add<fusing::RoPEInterleavedPairFusingPattern>(&getContext());
       patterns.add<fusing::TopKFusingPattern>(&getContext());
 
       GreedyRewriteConfig config;
