@@ -2,6 +2,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+#include <cstdlib>
 #include "ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h"
 
 #include "ttmlir/Conversion/Passes.h"
@@ -90,7 +91,10 @@ void createD2MFrontendPipeline(OpPassManager &pm,
   pm.addPass(ttir::createTTIRDecomposeComposites());
   pm.addPass(tt::createTTIRToTTIRDecompositionPass());
   pm.addPass(ttir::createTTIRExplicateTMs());
-  pm.addPass(ttir::createTTIREraseInverseOps());
+  // MOLA: EraseInverseOps loops forever on the where->lerp mask form;
+  // skip when mask const-eval is on.
+  if (![]{const char*e=::getenv("MOLA_TT_MASK_EVAL");return e&&e[0]=='1';}())
+    pm.addPass(ttir::createTTIREraseInverseOps());
   pm.addPass(ttir::createTTIRMoveReshapeToConstant());
   pm.addPass(ttir::createTTIRFoldConstantReshapeBroadcast());
   pm.addPass(ttir::createTTIRReductionForceKeepDim());
