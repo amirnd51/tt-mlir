@@ -694,6 +694,32 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               addMemrefValueContext(rewriter, analysis, allocOp.getResult(),
                                     allocOp.getType(), device);
           ctx.live = {genericSeqPos, genericSeqPos};
+          // MOLA local patch (2026-06-07): CB scratch reuses identical L1
+          // addresses across data-INDEPENDENT generics in the same program;
+          // overlapping execution clobbers the protocol (multi-branch
+          // matmuls). Default to whole-program CB live-ranges so each
+          // generic gets disjoint CBs. Opt out: MOLA_TT_CB_REUSE=1.
+          {
+            static const bool cbNoReuse = [] {
+              const char *e = ::getenv("MOLA_TT_CB_REUSE");
+              return !(e && e[0] == '1');
+            }();
+            if (cbNoReuse) {
+              // Whole-program ranges overflow L1 on 16-generic blocks; a
+              // sliding window covers data-independent fanout (parallel
+              // branches dispatch adjacently) while letting far-apart
+              // generics reuse. Window in sequence positions; default 64
+              // (~4 generics), MOLA_TT_CB_WINDOW overrides.
+              static const SequenceT win = [] {
+                const char *w = ::getenv("MOLA_TT_CB_WINDOW");
+                return static_cast<SequenceT>(w ? atoi(w) : 64);
+              }();
+              SequenceT end = genericSeqPos + win;
+              SequenceT maxPos = static_cast<SequenceT>(
+                  analysis.sequencing.positionMap.size());
+              ctx.live = {genericSeqPos, end < maxPos ? end : maxPos};
+            }
+          }
           ctx.isInsideGeneric = true;
           ctx.isMemspaceBound = true;
           ctx.speculativeStreamBuffer =
