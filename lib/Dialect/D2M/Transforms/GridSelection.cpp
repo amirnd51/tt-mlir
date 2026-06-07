@@ -288,9 +288,19 @@ static void insertViewForTTNNDRAMTensor(Value operand,
   AffineMap reblockMap = ttmlir::utils::calculateReblockMap(
       unShardedShapeWithGrid, fakeShardedShape, builder.getContext());
 
+  // MOLA local patch (2026-06-07): Interleaved is only correct for the
+  // single-core (1x1) distribution. For a multicore optimalGrid the view
+  // output must be Sharded so address derivation goes through the
+  // ShardLayout/coreVirtMap path (proven exact for arg-fed DRAM-sharded at
+  // 2x2/5x5/8x8); the hardcoded Interleaved tag fed consumers garbage on
+  // multicore grids (constant-fed matmuls divergent at >=2x2).
+  ttcore::TensorMemoryLayout viewMemLayout =
+      (ttmlir::utils::volume<int64_t>(llvm::ArrayRef(optimalGrid)) > 1)
+          ? ttcore::TensorMemoryLayout::Sharded
+          : ttcore::TensorMemoryLayout::Interleaved;
   auto viewOutputLayout = ttcore::MetalLayoutAttr::get(
       builder.getContext(), baseMetalLayout.getLogicalShape(),
-      ttcore::MemorySpace::DeviceDRAM, ttcore::TensorMemoryLayout::Interleaved,
+      ttcore::MemorySpace::DeviceDRAM, viewMemLayout,
       baseMetalLayout.getCollapsedIntervals(),
       baseMetalLayout.getDimAlignments());
 
