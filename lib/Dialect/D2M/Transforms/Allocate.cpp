@@ -555,14 +555,21 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
 
         Operation *firstOp = li->getStartOperation(result);
         Operation *lastOp = li->getEndOperation(result, firstOp);
-        // MOLA local patch (2026-06-07): address reuse across staged
-        // buffers within one program corrupts every program with 2+
-        // matmuls. Until root-caused, extend every alloc live range to
-        // the terminator so the planner never recycles addresses.
-        // Opt out with MOLA_TT_ALLOC_REUSE=1.
+        // MOLA local patch (2026-06-08, ROOT-CAUSED, now DEFAULT-ON): top-level
+        // staged-buffer ADDRESS REUSE corrupts re-dispatch (decode). A parallel
+        // matmul's output buffer (e.g. g in g*u) is reused/clobbered by the
+        // sibling (u) when buffer pressure forces address recycling, so on the
+        // 2nd+ dispatch the consumer reads the wrong result. Pinpointed via a
+        // 3-output (g, u, g*u) probe: at iters=2, g's output buffer holds u's
+        // data. Extending every top-level alloc's live range to the terminator
+        // (never recycle an address) eliminates the clobber; these buffers are
+        // mostly DRAM (plentiful) so it does NOT pressure L1. Result: the full
+        // dim=2048 Llama block decodes bf16-exact on EVERY dispatch (0.99990
+        // x5; vs ~0 corrupt before) — single forward pass unaffected.
+        // MOLA_TT_ALLOC_REUSE=1 restores upstream reuse (single-dispatch only).
         static const bool noReuse = [] {
           const char *e = ::getenv("MOLA_TT_ALLOC_REUSE");
-          return e && e[0] == '1' ? false : (e && e[0] == '2');
+          return !(e && e[0] == '1');
         }();
         if (noReuse) {
           lastOp = funcBody.getTerminator();
