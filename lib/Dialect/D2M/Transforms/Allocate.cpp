@@ -678,15 +678,16 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     // L1, so it falls back to the windowed reuse that is already decode-exact.
     // The discriminator is TWO conditions, both physical:
     //   (1) combiner CB footprint fits a fraction of L1 (else true overflow);
-    //   (2) the program is small enough (maxPos below a threshold) that giving
-    //       combiners whole-program ranges does not disturb the DENSE schedule
-    //       of a large block, where window-64 already separates every concurrent
-    //       parallel sibling. On the dim=2048 block (maxPos~4700) the combiners
-    //       DO fit L1 (~312KB), but whole-program ranges shift the non-combiner
-    //       sibling addresses and reintroduce a clobber the window-64 layout
-    //       avoided — so size, not capacity, is what excludes the block.
-    // Single self-selecting policy: maximal CB isolation when it both fits and
-    // the program is small; windowed reuse otherwise. Override with MOLA_TT_CB_
+    //   (2) max combiner GRID OCCUPANCY is below a threshold — i.e. ops leave
+    //       cores free, so data-independent siblings actually run CONCURRENTLY
+    //       and need disjoint L1. At high occupancy each op saturates the grid,
+    //       siblings serialize, and window-64 alone isolates them (disjoint
+    //       ranges then only disturb the dense layout — that is why the dim=2048
+    //       block, grid 65-91, must use window-64 while the dim=256 block,
+    //       grid<=39, and every component, grid<=8, want disjoint).
+    // Single self-selecting policy: maximal CB isolation when it fits L1 and the
+    // device is under-occupied (concurrency is real); windowed reuse when the
+    // grid is saturated (siblings serialize). Override with MOLA_TT_CB_
     // COMBINER_DISJOINT (0=force off, 1=force on); default = auto.
     auto alignedAllocBytes = [&](memref::AllocOp allocOp,
                                  int32_t numBuffers) -> AllocSizeT {
@@ -707,11 +708,23 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
       return 0;
     };
     AllocSizeT combinerFootprint = 0;
+    int64_t maxCombinerGridVol = 0;
     funcBody.walk([&](d2m::GenericOp g) {
       if (g.getInputs().size() < 2) {
         return;
       }
       g->walk([&](memref::AllocOp a) { combinerFootprint += combinerCBBytes(a); });
+      // Device occupancy of this combiner = product of its grid extents (the
+      // number of Tensix cores it spans).
+      int64_t vol = 1;
+      if (auto grid = g.getGrid()) {
+        for (int64_t d : grid.getShape()) {
+          vol *= d;
+        }
+      }
+      if (vol > maxCombinerGridVol) {
+        maxCombinerGridVol = vol;
+      }
     });
     const AllocSizeT l1Capacity = L1memInfo.maxAddress - L1memInfo.baseAddress;
     // Fraction of L1 the disjoint combiner set may occupy, leaving room for the
@@ -721,21 +734,28 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
       const char *p = ::getenv("MOLA_TT_CB_DISJOINT_FRAC");
       return static_cast<AllocSizeT>(p ? atoi(p) : 50);
     }();
-    // Max program size (sequence positions) for which whole-program combiner
-    // ranges are safe. Above this, the schedule is dense enough that window-64
-    // already isolates concurrent siblings and disjoint combiners only disturb
-    // it. Components: maxPos<=1697; dim=2048 block: ~4700. Tunable via
-    // MOLA_TT_CB_DISJOINT_MAXPOS (default 2500).
-    const SequenceT disjointMaxPos = [] {
-      const char *m = ::getenv("MOLA_TT_CB_DISJOINT_MAXPOS");
-      return static_cast<SequenceT>(m ? atoi(m) : 2500);
+    // Max combiner GRID OCCUPANCY (Tensix cores spanned) for which whole-program
+    // combiner ranges help rather than hurt. This is the physical discriminator
+    // for the re-dispatch race: at LOW occupancy the device has free cores, so
+    // the async scheduler runs data-independent siblings CONCURRENTLY on
+    // disjoint cores — their per-core CB scratch must live at disjoint L1
+    // addresses or they clobber each other across dispatches (needs whole-
+    // program ranges). At HIGH occupancy each op already saturates the grid, so
+    // siblings SERIALIZE on shared cores and the protective window-64 alone
+    // isolates them — whole-program ranges then only disturb the dense layout.
+    // Measured: components grid<=8, dim=256 block grid<=39 (both need disjoint);
+    // dim=2048 block grid 65-91 (needs window-64). Threshold 48 splits them.
+    // Tunable via MOLA_TT_CB_DISJOINT_MAXGRID (default 48).
+    const int64_t disjointMaxGrid = [] {
+      const char *m = ::getenv("MOLA_TT_CB_DISJOINT_MAXGRID");
+      return static_cast<int64_t>(m ? atoi(m) : 48);
     }();
     const SequenceT funcMaxPos =
         static_cast<SequenceT>(analysis.sequencing.positionMap.size());
     const bool combinerDisjointAuto =
         combinerFootprint > 0 &&
         combinerFootprint <= (l1Capacity * disjointFracPct) / 100 &&
-        funcMaxPos <= disjointMaxPos;
+        maxCombinerGridVol <= disjointMaxGrid;
     const bool combinerDisjoint = [&] {
       const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
       if (e && e[0] == '0') {
@@ -749,6 +769,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     if (::getenv("MOLA_TT_DUMP_MAXPOS")) {
       llvm::errs() << "MOLA CB: combinerFootprint=" << combinerFootprint
                    << " l1Capacity=" << l1Capacity << " maxPos=" << funcMaxPos
+                   << " maxCombinerGrid=" << maxCombinerGridVol
                    << " auto=" << combinerDisjointAuto
                    << " -> combinerDisjoint=" << combinerDisjoint << "\n";
     }
