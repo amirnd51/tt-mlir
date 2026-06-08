@@ -60,7 +60,8 @@ EltwiseBinaryCompositeOpResult callEltwiseBinaryComposite(
                                              lhs, rhs, params);
   };
 
-  callOp(eltwiseBinaryCompositeOp);
+  return callOp<EltwiseBinaryCompositeOpResult>(eltwiseBinaryCompositeOp,
+                                                callType, makeTuple, device);
 }
 
 struct EltwiseBinaryCompositeScalarResolvedParams {

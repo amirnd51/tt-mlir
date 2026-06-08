@@ -80,7 +80,9 @@ EltwiseBinaryCompositeScalarOpResult callEltwiseBinaryCompositeScalar(
       return createEltwiseBinaryCompositeScalarTuple(tag, lhs, scalar, params);
     };
 
-    callOp(::ttnn::pow);
+    return callOp<EltwiseBinaryCompositeScalarOpResult>(WRAP_OP(::ttnn::pow),
+                                                        callType, makeTuple,
+                                                        device);
   };
 
   const auto &rhs = eltwiseBinaryCompositeScalarOpT.rhs;

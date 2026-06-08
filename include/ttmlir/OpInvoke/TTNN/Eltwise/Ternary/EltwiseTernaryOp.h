@@ -53,7 +53,7 @@ EltwiseTernaryOpResult callEltwiseTernary(
                                      third, params);
   };
 
-  callOp(eltwiseTernaryOp);
+  return callOp<EltwiseTernaryOpResult>(eltwiseTernaryOp, callType, makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke

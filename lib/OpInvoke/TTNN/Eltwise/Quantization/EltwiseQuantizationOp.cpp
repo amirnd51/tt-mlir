@@ -91,7 +91,7 @@ EltwiseQuantizationOpResult callEltwiseQuantizeDequantize(
                                                 zeroPointParam, params);
   };
 
-  callOp(func);
+  return callOp<EltwiseQuantizationOpResult>(func, callType, makeTuple, device);
 }
 
 template <typename Tag>
@@ -134,7 +134,7 @@ EltwiseQuantizationOpResult callEltwiseRequantize(
         outScaleParam, outZeroPointParam, params);
   };
 
-  callOp(::ttnn::requantize);
+  return callOp<EltwiseQuantizationOpResult>(::ttnn::requantize, callType, makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke

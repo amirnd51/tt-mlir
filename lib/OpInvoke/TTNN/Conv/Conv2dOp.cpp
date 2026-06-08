@@ -108,7 +108,7 @@ Conv2dOpResult callConv2d(CallType callType,
                              params);
   };
 
-  callOp(::ttnn::conv2d);
+  return callOp<Conv2dOpResult>(::ttnn::conv2d, callType, makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke

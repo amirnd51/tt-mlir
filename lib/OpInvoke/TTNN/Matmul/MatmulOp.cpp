@@ -98,7 +98,7 @@ MatmulOpResult callMatmul(CallType callType,
     return createMatmulTuple(tag, matmulOpT, lhs, rhs, params);
   };
 
-  callOp(::ttnn::matmul);
+  return callOp<MatmulOpResult>(::ttnn::matmul, callType, makeTuple, device);
 }
 
 LinearResolvedParams
@@ -160,7 +160,7 @@ LinearOpResult callLinear(CallType callType,
     return createLinearTuple(tag, linearOpT, a, b, bias, params);
   };
 
-  callOp(::ttnn::linear);
+  return callOp<LinearOpResult>(::ttnn::linear, callType, makeTuple, device);
 }
 
 SparseMatmulResolvedParams resolveSparseMatmulParams(
@@ -222,8 +222,7 @@ callSparseMatmul(CallType callType,
                                    params);
   };
 
-  tryCallingOp(::ttnn::sparse_matmul, /*constraintsImplemented=*/false,
-               /*runtimeImplemented=*/false, "SparseMatmulOp");
+  return callOp<SparseMatmulOpResult, false, false>(::ttnn::sparse_matmul, callType, makeTuple, device, "SparseMatmulOp");
 }
 
 } // namespace ttnn_op_invoke

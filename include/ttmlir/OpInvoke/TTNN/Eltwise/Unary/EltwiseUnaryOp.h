@@ -60,7 +60,7 @@ callEltwiseUnary(CallType callType,
     return createEltwiseUnaryTuple(tag, eltwiseUnaryOpT, input, params);
   };
 
-  callOp(ttnnOp);
+  return callOp<EltwiseUnaryOpResult>(ttnnOp, callType, makeTuple, device);
 }
 
 template <typename Tag>
@@ -88,7 +88,7 @@ callEltwiseUnaryTanh(CallType callType,
     return createEltwiseUnaryTanhTuple(tag, eltwiseUnaryOpT, input, params);
   };
 
-  callOp(ttnnOp);
+  return callOp<EltwiseUnaryOpResult>(ttnnOp, callType, makeTuple, device);
 }
 
 template <typename Tag>
@@ -116,7 +116,7 @@ EltwiseUnaryOpResult callEltwiseUnaryWithFastAndApproximateMode(
         tag, eltwiseUnaryOpT, input, params);
   };
 
-  callOp(ttnnOp);
+  return callOp<EltwiseUnaryOpResult>(ttnnOp, callType, makeTuple, device);
 }
 
 template <typename Tag>
@@ -144,7 +144,7 @@ EltwiseUnaryOpResult callEltwiseUnarySigmoid(
     return createEltwiseUnarySigmoidTuple(tag, eltwiseUnaryOpT, input, params);
   };
 
-  callOp(ttnnOp);
+  return callOp<EltwiseUnaryOpResult>(ttnnOp, callType, makeTuple, device);
 }
 
 template <typename Tag>
@@ -172,7 +172,7 @@ EltwiseUnaryOpResult callEltwiseUnaryWithFloatParameter(
                                                      input, params);
   };
 
-  callOp(ttnnOp);
+  return callOp<EltwiseUnaryOpResult>(ttnnOp, callType, makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke

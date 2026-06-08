@@ -15,6 +15,8 @@
 #include "ttnn/operations/matmul/device/config/matmul_program_config_types.hpp"
 #include "ttnn/operations/transformer/sdpa_config.hpp"
 
+#include "llvm/Support/ErrorHandling.h"
+
 // Macros to wrap overloaded functions for use with
 // query_op_constraints/runtime. These create a generic lambda that forwards
 // arguments, letting the compiler resolve the correct overload based on the
@@ -53,47 +55,49 @@ inline auto resolveTensorArg(TensorArg arg, ExecuteTag callType) {
   return *std::get<const ::ttnn::Tensor *>(arg);
 }
 
-#define tryCallingOp(op, constraintsImplemented, runtimeImplemented, opName)   \
-  switch (callType) {                                                          \
-  case CallType::QUERY_OP_CONSTRAINTS:                                         \
-    if constexpr (!constraintsImplemented) {                                   \
-      ::ttnn::graph::ConstraintQueryResponse response;                         \
-      response.error_message =                                                 \
-          std::string("Constraint query not implemented for ") + opName +      \
-          " yet";                                                              \
-      return response;                                                         \
-    }                                                                          \
-    return std::apply(                                                         \
-        [&](auto &&...args) {                                                  \
-          return QUERY_OP_CONSTRAINTS(op, device,                              \
-                                      std::forward<decltype(args)>(args)...);  \
-        },                                                                     \
-        makeTuple(QueryTag{}));                                                \
-  case CallType::QUERY_OP_RUNTIME:                                             \
-    if constexpr (!runtimeImplemented) {                                       \
-      ::ttnn::graph::RuntimeQueryResponse response;                            \
-      response.error_message =                                                 \
-          std::string("Runtime query not implemented for ") + opName + " yet"; \
-      return response;                                                         \
-    }                                                                          \
-    return std::apply(                                                         \
-        [&](auto &&...args) {                                                  \
-          return QUERY_OP_RUNTIME(op, device,                                  \
-                                  std::forward<decltype(args)>(args)...);      \
-        },                                                                     \
-        makeTuple(QueryTag{}));                                                \
-  case CallType::EXECUTE: {                                                    \
-    auto executeTuple = makeTuple(ExecuteTag{});                               \
-    return std::apply(                                                         \
-        [&](auto &&...args) {                                                  \
-          return op(std::forward<decltype(args)>(args)...);                    \
-        },                                                                     \
-        executeTuple);                                                         \
-  }                                                                            \
-  }                                                                            \
+template <typename Result, bool ConstraintsImplemented = true,
+          bool RuntimeImplemented = true>
+Result callOp(auto op, CallType callType, auto makeTuple,
+              ::ttnn::MeshDevice *device, std::string opName = "") {
+  switch (callType) {
+  case CallType::QUERY_OP_CONSTRAINTS:
+    if constexpr (!ConstraintsImplemented) {
+      ::ttnn::graph::ConstraintQueryResponse response;
+      response.error_message =
+          std::string("Constraint query not implemented for ") + opName +
+          " yet";
+      return response;
+    }
+    return std::apply(
+        [&](auto &&...args) {
+          return QUERY_OP_CONSTRAINTS(op, device,
+                                      std::forward<decltype(args)>(args)...);
+        },
+        makeTuple(QueryTag{}));
+  case CallType::QUERY_OP_RUNTIME:
+    if constexpr (!RuntimeImplemented) {
+      ::ttnn::graph::RuntimeQueryResponse response;
+      response.error_message =
+          std::string("Runtime query not implemented for ") + opName + " yet";
+      return response;
+    }
+    return std::apply(
+        [&](auto &&...args) {
+          return QUERY_OP_RUNTIME(op, device,
+                                  std::forward<decltype(args)>(args)...);
+        },
+        makeTuple(QueryTag{}));
+  case CallType::EXECUTE: {
+    auto executeTuple = makeTuple(ExecuteTag{});
+    return std::apply(
+        [&](auto &&...args) {
+          return op(std::forward<decltype(args)>(args)...);
+        },
+        executeTuple);
+  }
+  }
   llvm_unreachable("unhandled CallType");
-
-#define callOp(op) tryCallingOp(op, true, true, "")
+}
 
 } // namespace ttnn_op_invoke
 

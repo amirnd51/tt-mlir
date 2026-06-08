@@ -122,7 +122,8 @@ EltwiseUnaryCompositeOpResult callEltwiseUnaryCompositeClampScalar(
         tag, eltwiseUnaryCompositeOpT, input, params);
   };
 
-  callOp(::ttnn::clamp);
+  return callOp<EltwiseUnaryCompositeOpResult>(WRAP_OP(::ttnn::clamp), callType,
+                                               makeTuple, device);
 }
 
 template <typename Tag>
@@ -151,7 +152,8 @@ EltwiseUnaryCompositeOpResult callEltwiseUnaryCompositeClampTensor(
         tag, eltwiseUnaryCompositeOpT, input, min, max, params);
   };
 
-  callOp(::ttnn::clamp);
+  return callOp<EltwiseUnaryCompositeOpResult>(WRAP_OP(::ttnn::clamp), callType,
+                                               makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke
