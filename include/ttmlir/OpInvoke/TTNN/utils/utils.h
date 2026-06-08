@@ -20,7 +20,10 @@
 // Macros to wrap overloaded functions for use with
 // query_op_constraints/runtime. These create a generic lambda that forwards
 // arguments, letting the compiler resolve the correct overload based on the
-// actual argument types.
+// actual argument types. Wrapping must happen where the function name is still
+// visible (i.e. at the call site), because once a free function is passed as a
+// parameter it decays to a function pointer and loses its default arguments and
+// overload set.
 // clang-format off
 #define WRAP_OP(op)                                                            \
   [&](auto &&...args) -> decltype(op(std::forward<decltype(args)>(args)...)) { \
@@ -68,10 +71,12 @@ Result callOp(auto op, CallType callType, auto makeTuple,
           " yet";
       return response;
     }
+    // op is already a WRAP_OP-style callable (wrapped at the call site), so it
+    // is forwarded directly without re-wrapping.
     return std::apply(
         [&](auto &&...args) {
-          return QUERY_OP_CONSTRAINTS(op, device,
-                                      std::forward<decltype(args)>(args)...);
+          return ::ttnn::graph::query_op_constraints(
+              op, device, std::forward<decltype(args)>(args)...);
         },
         makeTuple(QueryTag{}));
   case CallType::QUERY_OP_RUNTIME:
@@ -83,8 +88,8 @@ Result callOp(auto op, CallType callType, auto makeTuple,
     }
     return std::apply(
         [&](auto &&...args) {
-          return QUERY_OP_RUNTIME(op, device,
-                                  std::forward<decltype(args)>(args)...);
+          return ::ttnn::graph::query_op_runtime(
+              op, device, std::forward<decltype(args)>(args)...);
         },
         makeTuple(QueryTag{}));
   case CallType::EXECUTE: {

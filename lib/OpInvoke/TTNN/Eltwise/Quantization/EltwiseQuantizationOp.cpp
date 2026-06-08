@@ -134,7 +134,7 @@ EltwiseQuantizationOpResult callEltwiseRequantize(
         outScaleParam, outZeroPointParam, params);
   };
 
-  return callOp<EltwiseQuantizationOpResult>(::ttnn::requantize, callType, makeTuple, device);
+  return callOp<EltwiseQuantizationOpResult>(WRAP_OP(::ttnn::requantize), callType, makeTuple, device);
 }
 
 } // namespace ttnn_op_invoke
