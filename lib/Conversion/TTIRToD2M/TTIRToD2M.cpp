@@ -38,9 +38,11 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/LogicalResult.h"
+#include <cstdlib>
 
 #include <array>
 #include <cstddef>
@@ -2521,6 +2523,24 @@ private:
     auto inputTensorType =
         mlir::cast<RankedTensorType>(origInputs[0].getType());
     bool noCollapse = (inputTensorType.getRank() > 2);
+
+    // MOLA opt #1: if molaPinReuseActivations marked this matmul, pin its LHS
+    // activation into L1 by tagging the (already-converted) LHS operand's
+    // mola.memspace, which resolveMolaMemSpace honors during the layout below.
+    // Done here — not at the producer — because conversion has remapped the
+    // value, and the matmul op (carrying the marker) is what survives to here.
+    if (op->hasAttr("mola.lhs_l1") && !origInputs.empty()) {
+      Value lhs = origInputs[0];
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(lhs)) {
+        if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                barg.getOwner()->getParentOp())) {
+          fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
+        }
+      } else if (mlir::Operation *def = lhs.getDefiningOp()) {
+        def->setAttr("mola.memspace", l1);
+      }
+    }
 
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true, noCollapse);
@@ -5618,6 +5638,79 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
 #include "ttmlir/Conversion/Passes.h.inc"
 
 namespace {
+
+// MOLA opt #1: reuse-aware L1 pinning of matmul-input activations. Tags the
+// `mola.memspace="l1"` attr (honored by resolveMolaMemSpace) on matmul-LHS
+// activations — args AND intermediates — ranked by (#matmuls-as-LHS)*bytes and
+// greedily packed into a reserved fraction of L1.
+static void molaPinReuseActivations(ModuleOp module, MLIRContext *ctx) {
+  int64_t l1Cap = 0;
+  if (auto sysDesc = ttcore::getCurrentScopeSystemDesc(module)) {
+    if (!sysDesc.getChipDescs().empty()) {
+      l1Cap = static_cast<int64_t>(
+          sysDesc.getChipDescs().front().getUsableL1Size());
+    }
+  }
+  if (l1Cap <= 0) {
+    return;
+  }
+  const int64_t reservePct = [] {
+    const char *p = ::getenv("MOLA_TT_L1_PIN_RESERVE_PCT");
+    return static_cast<int64_t>(p ? atoi(p) : 50);
+  }();
+  auto tensorBytes = [](RankedTensorType rt) -> int64_t {
+    int64_t elems = 1;
+    for (int64_t d : rt.getShape()) {
+      elems *= d;
+    }
+    return elems *
+           llvm::divideCeil(rt.getElementType().getIntOrFloatBitWidth(), 8);
+  };
+  // Collect every matmul-LHS activation and the matmuls that read it as LHS.
+  llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
+  module.walk(
+      [&](ttir::MatmulOp mm) { lhsToMatmuls[mm->getOperand(0)].push_back(mm); });
+  struct Cand {
+    Value v;
+    int64_t bytes;
+    int64_t benefit;
+  };
+  llvm::SmallVector<Cand> cands;
+  for (auto &kv : lhsToMatmuls) {
+    auto rt = dyn_cast<RankedTensorType>(kv.first.getType());
+    if (!rt || !rt.hasStaticShape()) {
+      continue;
+    }
+    const int64_t b = tensorBytes(rt);
+    cands.push_back(
+        {kv.first, b, static_cast<int64_t>(kv.second.size()) * b});
+  }
+  llvm::sort(cands, [](const Cand &a, const Cand &b) {
+    if (a.benefit != b.benefit) {
+      return a.benefit > b.benefit;
+    }
+    return a.bytes < b.bytes;
+  });
+  const int64_t budget = (l1Cap * (100 - reservePct)) / 100;
+  int64_t used = 0;
+  int64_t pinned = 0;
+  // Mark the CONSUMING matmul ops (which survive until their own rewrite). The
+  // matmul rewriter propagates L1 onto the adapted LHS operand at layout time —
+  // tagging the producer value here would be lost to conversion remapping for
+  // intermediates.
+  for (const Cand &c : cands) {
+    if (used + c.bytes > budget) {
+      continue;
+    }
+    used += c.bytes;
+    ++pinned;
+    for (Operation *mm : lhsToMatmuls[c.v]) {
+      mm->setAttr("mola.lhs_l1", UnitAttr::get(ctx));
+    }
+  }
+  (void)pinned;
+}
+
 class TTIRToD2MPass final
     : public mlir::tt::impl::TTIRToD2MBase<TTIRToD2MPass> {
 public:
@@ -5646,6 +5739,22 @@ public:
   void runOnOperation() override {
     MLIRContext *ctx = &getContext();
     ModuleOp module = getOperation();
+
+    // MOLA reuse-aware L1 pinning of matmul-input activations (opt #1,
+    // 2026-06-08). Upstream stages every activation in DRAM; each matmul then
+    // mcast-re-reads its LHS activation from DRAM across the output tile grid.
+    // MOLA pins matmul-LHS activations (args AND intermediates — e.g. the
+    // rms-normed activation feeding Q/K/V) into L1 so the contraction reads
+    // them from L1, cutting DRAM activation traffic. Done HERE, at the very
+    // start of TTIRToD2M, so the `mola.memspace` tags land on STABLE ops and
+    // are honored by resolveMolaMemSpace below — tagging earlier (in TTBackend,
+    // before the TTIR rewrites) loses intermediate tags. Ranked by (#matmuls
+    // using it as LHS)*bytes; greedily pinned within a reserved L1 budget
+    // (default 50%, MOLA_TT_L1_PIN_RESERVE_PCT). Weights (matmul RHS) are never
+    // candidates. Gated MOLA_TT_L1_PIN_REUSE=1.
+    if (::getenv("MOLA_TT_L1_PIN_REUSE")) {
+      molaPinReuseActivations(module, ctx);
+    }
 
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type t) { return t; });
