@@ -710,13 +710,35 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               // branches dispatch adjacently) while letting far-apart
               // generics reuse. Window in sequence positions; default 64
               // (~4 generics), MOLA_TT_CB_WINDOW overrides.
+              //
+              // MOLA local patch (2026-06-08, #126, OPT-IN MOLA_TT_CB_COMBINER
+              // _DISJOINT=1): the iters>=2 re-dispatch corruption is
+              // parallel-sibling-specific — two data-INDEPENDENT combiner
+              // generics (>=2 inputs: matmul, mul, add) reuse the same per-core
+              // CB-scratch L1 addresses, and on re-dispatch one reads its CB
+              // before fully writing it, picking up the sibling's stale state.
+              // Under the flag, combiners get whole-program (disjoint) CB ranges
+              // and non-combiners a minimal range (max reuse to free L1). This
+              // fixes component-level decode re-dispatch (mul_par/swiglu/attn
+              // it2 -> 1.0) and fits L1, BUT does NOT fix the full dim=2048 block
+              // decode (it still has non-combiner parallel siblings that need
+              // disjoint CBs too -> L1-bound; that needs the kernel CB zero-init
+              // fix). Default OFF: the uniform window-64, single-pass exact.
+              static const bool combinerDisjoint = [] {
+                const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
+                return e && e[0] == '1';
+              }();
               static const SequenceT win = [] {
                 const char *w = ::getenv("MOLA_TT_CB_WINDOW");
-                return static_cast<SequenceT>(w ? atoi(w) : 64);
+                return static_cast<SequenceT>(w ? atoi(w)
+                                                : (combinerDisjoint ? 0 : 64));
               }();
-              SequenceT end = genericSeqPos + win;
               SequenceT maxPos = static_cast<SequenceT>(
                   analysis.sequencing.positionMap.size());
+              SequenceT end =
+                  (combinerDisjoint && genericOp.getInputs().size() >= 2)
+                      ? maxPos
+                      : (genericSeqPos + win);
               ctx.live = {genericSeqPos, end < maxPos ? end : maxPos};
             }
           }
