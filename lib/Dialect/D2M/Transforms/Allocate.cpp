@@ -573,30 +573,14 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
 
         Operation *firstOp = li->getStartOperation(result);
         Operation *lastOp = li->getEndOperation(result, firstOp);
-        // MOLA local patch (2026-06-08, ROOT-CAUSED, diagnosis only — default
-        // behavior intentionally unchanged from upstream reuse):
-        // mlir::Liveness ends a staged result buffer's live range at its last
-        // *direct* use, missing that a parallel sibling generic's write to a
-        // recycled address is still pending. The planner then reuses that
-        // address while the buffer is still live and clobbers it — this is the
-        // deterministic (NOT racy) miscompile behind the multi-generic
-        // failures: xW1+xW2 -> 0.76 cosine (1 of 4 output tiles correct).
-        //
-        // `MOLA_TT_ALLOC_REUSE=2` extends EVERY alloc to the terminator (never
-        // recycle): this deterministically fixes the parallel-matmul clobber
-        // (0.76 -> 1.0) AND single-head attention's L1 clobber (-0.03 -> 1.0)
-        // in isolation. But it is NOT a safe default: extending L1 liveness
-        // converts larger fan-in (qkv reuse-3) into a multicore CB/semaphore
-        // DEADLOCK that wedges the device, and inflates L1 peak. A DRAM-only
-        // extension is safe but does NOT fix the parallel clobber (the clobber
-        // chain runs through an L1 result). So a correct fix must repair the
-        // liveness computation itself, not bluntly extend ranges — tracked
-        // separately. The robust shipped fix for the add-class (parallel/QKV)
-        // is the compile-time merge fold (MOLA_TT_MERGE_MATMUL), not this.
-        // =1 also forces upstream reuse explicitly.
+        // MOLA local patch (2026-06-07): address reuse across staged
+        // buffers within one program corrupts every program with 2+
+        // matmuls. Until root-caused, extend every alloc live range to
+        // the terminator so the planner never recycles addresses.
+        // Opt out with MOLA_TT_ALLOC_REUSE=1.
         static const bool noReuse = [] {
           const char *e = ::getenv("MOLA_TT_ALLOC_REUSE");
-          return e && e[0] == '2';
+          return e && e[0] == '1' ? false : (e && e[0] == '2');
         }();
         if (noReuse) {
           lastOp = funcBody.getTerminator();
