@@ -1290,6 +1290,19 @@ private:
                          .take_front(origInputs.size()),
                      [](mlir::AffineMap map) { return !map.isIdentity(); });
 
+    // MOLA opt #2 (MOLA_TT_FUSE_DRAM): if molaPinActivations marked this
+    // elementwise op, pin its intermediate inputs into L1 so the producer->
+    // consumer round-trip stays in L1 (vs write-to-DRAM + read). Tag the adapted
+    // input operands' defining ops — resolveMolaMemSpace honors them below.
+    if (op->hasAttr("mola.in_l1")) {
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      for (Value in : origInputs) {
+        if (mlir::Operation *def = in.getDefiningOp()) {
+          def->setAttr("mola.memspace", l1);
+        }
+      }
+    }
+
     auto [inputs, outputs] =
         toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
                                    /*tiled*/ true, isImplicitBcast);
@@ -2541,7 +2554,6 @@ private:
         def->setAttr("mola.memspace", l1);
       }
     }
-
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true, noCollapse);
 
@@ -5639,11 +5651,27 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
 
 namespace {
 
-// MOLA opt #1: reuse-aware L1 pinning of matmul-input activations. Tags the
-// `mola.memspace="l1"` attr (honored by resolveMolaMemSpace) on matmul-LHS
-// activations — args AND intermediates — ranked by (#matmuls-as-LHS)*bytes and
-// greedily packed into a reserved fraction of L1.
-static void molaPinReuseActivations(ModuleOp module, MLIRContext *ctx) {
+// MOLA opt #1 (MOLA_TT_L1_PIN_REUSE) + opt #2 (MOLA_TT_FUSE_DRAM): L1-pin
+// matmul-input activations (LHS, reused) and/or matmul-output intermediates
+// (round-trips), tagged via the `mola.memspace="l1"` attr that resolveMolaMemSpace
+// honors. Candidates ranked by DRAM bytes saved (input: #matmuls-as-LHS*bytes;
+// output: 2*bytes for the write+read round-trip) and greedily packed into a
+// SHARED reserved L1 budget so input+output pinning don't overflow. The matmul
+// ops are marked (mola.lhs_l1 / mola.out_l1); the matmul rewriter propagates L1
+// onto the adapted operands at layout time — tagging producer values here would
+// be lost to dialect-conversion remapping for intermediates.
+static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+  const bool pinInput = [] {
+    const char *e = ::getenv("MOLA_TT_L1_PIN_REUSE");
+    return e && e[0] == '1';
+  }();
+  const bool pinOutput = [] {
+    const char *e = ::getenv("MOLA_TT_FUSE_DRAM");
+    return e && e[0] == '1';
+  }();
+  if (!pinInput && !pinOutput) {
+    return;
+  }
   int64_t l1Cap = 0;
   if (auto sysDesc = ttcore::getCurrentScopeSystemDesc(module)) {
     if (!sysDesc.getChipDescs().empty()) {
@@ -5666,24 +5694,56 @@ static void molaPinReuseActivations(ModuleOp module, MLIRContext *ctx) {
     return elems *
            llvm::divideCeil(rt.getElementType().getIntOrFloatBitWidth(), 8);
   };
-  // Collect every matmul-LHS activation and the matmuls that read it as LHS.
-  llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
-  module.walk(
-      [&](ttir::MatmulOp mm) { lhsToMatmuls[mm->getOperand(0)].push_back(mm); });
   struct Cand {
-    Value v;
     int64_t bytes;
     int64_t benefit;
+    bool isOutput;
+    llvm::SmallVector<Operation *> matmuls;
   };
   llvm::SmallVector<Cand> cands;
-  for (auto &kv : lhsToMatmuls) {
-    auto rt = dyn_cast<RankedTensorType>(kv.first.getType());
-    if (!rt || !rt.hasStaticShape()) {
-      continue;
+  // Input candidates: matmul-LHS activations (reuse).
+  if (pinInput) {
+    llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
+    module.walk([&](ttir::MatmulOp mm) {
+      lhsToMatmuls[mm->getOperand(0)].push_back(mm);
+    });
+    for (auto &kv : lhsToMatmuls) {
+      auto rt = dyn_cast<RankedTensorType>(kv.first.getType());
+      if (!rt || !rt.hasStaticShape()) {
+        continue;
+      }
+      const int64_t b = tensorBytes(rt);
+      cands.push_back({b, static_cast<int64_t>(kv.second.size()) * b,
+                       /*isOutput=*/false, kv.second});
     }
-    const int64_t b = tensorBytes(rt);
-    cands.push_back(
-        {kv.first, b, static_cast<int64_t>(kv.second.size()) * b});
+  }
+  // Fuse candidates (opt #2): intermediates consumed by NON-matmul ops
+  // (elementwise: add/mul/silu in SwiGLU + residual). Matmul outputs are
+  // already L1 and matmul-consumed intermediates are handled by opt #1, so the
+  // remaining DRAM round-trips are elementwise-consumed transients. Keep them in
+  // L1 by marking the CONSUMER op (mola.in_l1); the elementwise rewriter pins
+  // its inputs. Benefit = 2*bytes (write+read round-trip saved).
+  if (pinOutput) {
+    llvm::MapVector<Value, llvm::SmallVector<Operation *>> interToConsumers;
+    module.walk([&](Operation *op) {
+      if (isa<ttir::MatmulOp>(op)) {
+        return;
+      }
+      for (Value in : op->getOperands()) {
+        if (!in.getDefiningOp()) {
+          continue; // arg, not an intermediate
+        }
+        auto rt = dyn_cast<RankedTensorType>(in.getType());
+        if (rt && rt.hasStaticShape()) {
+          interToConsumers[in].push_back(op);
+        }
+      }
+    });
+    for (auto &kv : interToConsumers) {
+      auto rt = cast<RankedTensorType>(kv.first.getType());
+      const int64_t b = tensorBytes(rt);
+      cands.push_back({b, 2 * b, /*isOutput=*/true, kv.second});
+    }
   }
   llvm::sort(cands, [](const Cand &a, const Cand &b) {
     if (a.benefit != b.benefit) {
@@ -5693,22 +5753,16 @@ static void molaPinReuseActivations(ModuleOp module, MLIRContext *ctx) {
   });
   const int64_t budget = (l1Cap * (100 - reservePct)) / 100;
   int64_t used = 0;
-  int64_t pinned = 0;
-  // Mark the CONSUMING matmul ops (which survive until their own rewrite). The
-  // matmul rewriter propagates L1 onto the adapted LHS operand at layout time —
-  // tagging the producer value here would be lost to conversion remapping for
-  // intermediates.
   for (const Cand &c : cands) {
     if (used + c.bytes > budget) {
       continue;
     }
     used += c.bytes;
-    ++pinned;
-    for (Operation *mm : lhsToMatmuls[c.v]) {
-      mm->setAttr("mola.lhs_l1", UnitAttr::get(ctx));
+    StringRef marker = c.isOutput ? "mola.in_l1" : "mola.lhs_l1";
+    for (Operation *mm : c.matmuls) {
+      mm->setAttr(marker, UnitAttr::get(ctx));
     }
   }
-  (void)pinned;
 }
 
 class TTIRToD2MPass final
@@ -5752,9 +5806,7 @@ public:
     // using it as LHS)*bytes; greedily pinned within a reserved L1 budget
     // (default 50%, MOLA_TT_L1_PIN_RESERVE_PCT). Weights (matmul RHS) are never
     // candidates. Gated MOLA_TT_L1_PIN_REUSE=1.
-    if (::getenv("MOLA_TT_L1_PIN_REUSE")) {
-      molaPinReuseActivations(module, ctx);
-    }
+    molaPinActivations(module, ctx);
 
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type t) { return t; });
