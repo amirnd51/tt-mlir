@@ -51,12 +51,14 @@ ChipDescAttr getOpChipDescAttr(Operation *op) {
   return systemDesc.getChipDesc(chipIds[0]);
 }
 
-NocIndex defaultNocForProcessor(Arch arch, int32_t processorIndex) {
-  // Quasar has a single NoC: every data-movement core uses NoC0.
+NocIndex defaultNocForProcessor(const Arch arch, const int32_t processorIndex) {
+  // Quasar has a single NoC: every DM core uses NoC0.
   if (arch == Arch::Quasar) {
     return NocIndex::Noc0;
   }
-  // Wormhole/Blackhole: DM processor 1 -> NoC0, DM processor 0 -> NoC1.
+  // For Wormhole/Blackhole, mirror the Metalium reader/writer presets:
+  // - DRAM "reader" runs on RISCV_1 (NCRISC) and uses NoC0.
+  // - DRAM "writer" runs on RISCV_0 (BRISC) and uses NoC1.
   return processorIndex == 1 ? NocIndex::Noc0 : NocIndex::Noc1;
 }
 

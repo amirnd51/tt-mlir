@@ -23,9 +23,8 @@ def D2M_ThreadAttr : AttrDef<D2M_Dialect, "Thread", [], "::mlir::Attribute"> {
     Holds the thread information corresponding to a single generic op region.
     For datamovement threads, processorIndex indicates the assigned hardware
     datamovement processor. The default processor -> NoC mapping is defined in
-    one place, ttcore::defaultNocForProcessor (see TTCore/IR/Utils.h): on
-    Wormhole/Blackhole processor 1 maps to NoC0 and processor 0 maps to NoC1;
-    on Quasar every processor maps to NoC0.
+    ttcore::defaultNocForProcessor: on Wormhole/Blackhole processor 1 maps to
+    NoC0 and processor 0 maps to NoC1; on Quasar every processor maps to NoC0.
 
     A value of -1 means unassigned.
   }];

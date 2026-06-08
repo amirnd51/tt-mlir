@@ -48,7 +48,7 @@ static Value intConstant(OpBuilder &rewriter, Location loc, T value) {
 }
 
 static FailureOr<int32_t> getKernelNocIndex(Operation *op) {
-  const ttcore::Arch arch = ttcore::getOpChipDescAttr(op).getArch().getValue();
+  const auto arch = ttcore::getOpChipDescAttr(op).getArch().getValue();
 
   auto funcOp = op->getParentOfType<func::FuncOp>();
   if (!funcOp) {
@@ -62,24 +62,17 @@ static FailureOr<int32_t> getKernelNocIndex(Operation *op) {
     return failure();
   }
 
-  // Use the single source of truth for the DM-core -> NoC mapping.
   return static_cast<int32_t>(
       ttcore::defaultNocForProcessor(arch, threadAttr.getProcessorIndex()));
 }
 
-// Resolves the DM kernel's NoC index and materializes it as an i8 constant,
-// to attach to NoC ops as their explicit `noc` operand.
+// Early resolution & materialization of the DM kernel's NoC index in the
+// pipeline (before TTKernelToEmitC & D2MToTTMetal).
 //
-// Making the NoC selection explicit in the IR at conversion time lets
-// downstream (TTKernelToEmitC) resolve the NoC object directly from the
-// operand, independent of later pipeline ordering or backend (TTMetal vs TTNN)
-// -- without it, EmitC can only recover the NoC by walking up to a
-// ttmetal.enqueue_program that may not exist yet (or at all).
-//
-// Returns a null Value when the NoC index cannot be resolved (e.g. a function
-// with no d2m.thread attribute). Callers pass the null Value straight through
-// as an absent optional operand, preserving the prior behaviour where EmitC
-// falls back to the kernel's launch-time NoC.
+// Returns null when the NoC index cannot be resolved (e.g. a function with no
+// d2m.thread attribute). Callers pass the null Value straight through as an
+// absent optional `noc` operand, so TTKernelToEmitC falls back to the kernel's
+// default `noc_index` global variable.
 static Value materializeKernelNocId(OpBuilder &rewriter, Operation *op) {
   FailureOr<int32_t> nocIdx = getKernelNocIndex(op);
   if (failed(nocIdx)) {

@@ -3474,9 +3474,9 @@ def TTKernel_NocAsyncReadTileOp : TTKernel_Op<"noc_async_read_tile"> {
     }];
 
     let arguments = (ins I32:$id,
-                    AnyTypeOf<[TTKernel_InterleavedAddrGenFast, TTKernel_TensorAccessor]>:$addrGenStruct,
-                    I32:$dstLocalL1Addr,
-                    Optional<I8>:$noc);
+                         AnyTypeOf<[TTKernel_InterleavedAddrGenFast, TTKernel_TensorAccessor]>:$addrGenStruct,
+                         I32:$dstLocalL1Addr,
+                         Optional<I8>:$noc);
 
     let assemblyFormat = [{
       `(` $id `,` $addrGenStruct `,` $dstLocalL1Addr (`,` $noc^)? `)` attr-dict `:` functional-type(operands, results)
@@ -3615,9 +3615,9 @@ def TTKernel_NocAsyncWriteTileOp : TTKernel_Op<"noc_async_write_tile"> {
     }];
 
     let arguments = (ins IndexLike:$id,
-                    AnyTypeOf<[TTKernel_InterleavedAddrGenFast, TTKernel_TensorAccessor]>:$addrGenStruct,
-                    I32:$srcLocalL1Addr,
-                    Optional<I8>:$noc);
+                         AnyTypeOf<[TTKernel_InterleavedAddrGenFast, TTKernel_TensorAccessor]>:$addrGenStruct,
+                         I32:$srcLocalL1Addr,
+                         Optional<I8>:$noc);
 
     let assemblyFormat = [{
       `(` $id `,` $addrGenStruct `,` $srcLocalL1Addr (`,` $noc^)? `)` attr-dict `:` functional-type(operands, results)
@@ -4373,13 +4373,8 @@ def TTKernel_GetNocMulticastAddrOp : TTKernel_Op<"get_noc_multicast_addr"> {
   let description = [{
     Default tt-metal get_noc_multicast_addr.
 
-    The optional `noc` operand selects the NoC; when absent the kernel's
-    launch-time NoC is used. The start/end coordinates are interpreted exactly
-    as the Metalium API expects: on WH/BH NoC1 traverses bottom-left to
-    top-right (the opposite of NoC0), so the producer of this op (the D2M ->
-    TTKernel lowering, via D2MToTTKernel.cpp flipMcastCoordsIfNoc1) must already
-    have swapped start/end for NoC1. The flip and this op's `noc` are derived
-    from the same resolved NoC index, so they are always consistent.
+    The caller must make sure the start and end coordinates are flipped on
+    WH/BH's NoC1, especially when the optional `noc` operand is absent.
   }];
 
   let arguments = (ins IndexLike:$noc_x_start, IndexLike:$noc_y_start, IndexLike:$noc_x_end, IndexLike:$noc_y_end, AnyTypeOf<[I32, TTKernel_L1Addr, TTKernel_LocalSemaphore]>:$addr, Optional<I8>:$noc);
@@ -4413,10 +4408,8 @@ def TTKernel_NocAsyncWriteMulticastOp : TTKernel_Op<"noc_async_write_multicast">
     NOC coordinate range (x_start,y_start,x_end,y_end) and a local address.
     Also, *see noc_async_write_barrier*.
 
-    The optional `noc` operand selects the NoC; when absent the kernel's
-    launch-time NoC is used. The producer must already have swapped the mcast
-    start/end coordinates for WH/BH NoC1 (see D2MToTTKernel.cpp
-    flipMcastCoordsIfNoc1), using the same resolved NoC index as `noc`.
+    The caller must make sure the start and end coordinates are flipped on
+    WH/BH's NoC1, especially when the optional `noc` operand is absent.
 
     The destination nodes can only be a set of Tensix cores + L1 memory address.
     The destination nodes must form a rectangular grid. The destination L1
@@ -4458,10 +4451,8 @@ def TTKernel_NocAsyncWriteMulticastLoopbackSrcOp : TTKernel_Op<"noc_async_write_
   let description = [{
     Multicast write that allows the sender to be part of the destinations.
 
-    The optional `noc` operand selects the NoC; when absent the kernel's
-    launch-time NoC is used. The producer must already have swapped the mcast
-    start/end coordinates for WH/BH NoC1 (see D2MToTTKernel.cpp
-    flipMcastCoordsIfNoc1), using the same resolved NoC index as `noc`.
+    The caller must make sure the start and end coordinates are flipped on
+    WH/BH's NoC1, especially when the optional `noc` operand is absent.
   }];
 
   let arguments = (ins I32:$srcLocalL1Addr,

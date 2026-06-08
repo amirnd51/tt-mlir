@@ -108,9 +108,9 @@ def TTMetal_NocConfigAttr: TTMetal_Attr<"NocConfig", "noc_config", [TTMetal_Kern
   let description = [{
     Structure for configuring noc kernels.
 
-    The processor_index selects the data-movement (RISCV) core this kernel
-    launches on; noc_index selects the NoC it drives. See
-    ttcore::defaultNocForProcessor for the default processor -> NoC convention.
+    The processor_index selects the DM core this kernel launches on; noc_index
+    selects the NoC it drives. See ttcore::defaultNocForProcessor for the
+    default DM core -> NoC convention.
   }];
   let parameters = (ins "SymbolRefAttr":$kernel_symbol,
                         "CoreRangeAttr":$core_range,
