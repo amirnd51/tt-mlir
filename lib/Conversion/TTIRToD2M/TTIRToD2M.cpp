@@ -55,6 +55,30 @@ namespace mlir::tt {
 
 namespace {
 
+/// MOLA: does `v` root at a constant/weight (peeling reshape/broadcast/typecast/
+/// permute/view ops)? Constants must NOT be L1-pinned by opt #1/#2 — mis-placing
+/// a constant fill on the D2M path silently degenerates the consumer to a
+/// passthrough (see the constant-memspace handling in createOptimalLayoutOp), so
+/// pinning a bias/scale/mask constant feeding an elementwise op would miscompile.
+static bool molaRootsAtConstant(mlir::Value v) {
+  mlir::Operation *d = v.getDefiningOp();
+  while (d) {
+    llvm::StringRef n = d->getName().getStringRef();
+    if (n == "ttir.constant" || n == "arith.constant") {
+      return true;
+    }
+    if ((n == "ttir.reshape" || n == "ttir.broadcast" ||
+         n == "ttir.typecast" || n == "ttir.permute" ||
+         mlir::isa<mlir::ViewLikeOpInterface>(d)) &&
+        d->getNumOperands() >= 1) {
+      d = d->getOperand(0).getDefiningOp();
+    } else {
+      break;
+    }
+  }
+  return false;
+}
+
 /// True when the reduction touches a dim before the last two (tile C/R).
 /// Those go through the D2M outer-reduction path and must not be decomposed.
 template <typename TTIRReductionOp>
@@ -1297,6 +1321,11 @@ private:
     if (op->hasAttr("mola.in_l1")) {
       auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
       for (Value in : origInputs) {
+        // Pin only genuine intermediates — never a constant/weight (mis-placing
+        // a constant fill on this path silently degenerates to a passthrough).
+        if (molaRootsAtConstant(in)) {
+          continue;
+        }
         if (mlir::Operation *def = in.getDefiningOp()) {
           def->setAttr("mola.memspace", l1);
         }
@@ -5709,7 +5738,10 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
   if (pinInput) {
     llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
     module.walk([&](ttir::MatmulOp mm) {
-      lhsToMatmuls[mm->getOperand(0)].push_back(mm);
+      // operand 0 is the activation (LHS); skip if it roots at a constant.
+      if (!molaRootsAtConstant(mm->getOperand(0))) {
+        lhsToMatmuls[mm->getOperand(0)].push_back(mm);
+      }
     });
     for (auto &kv : lhsToMatmuls) {
       auto rt = dyn_cast<RankedTensorType>(kv.first.getType());
@@ -5736,6 +5768,9 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
       for (Value in : op->getOperands()) {
         if (!in.getDefiningOp()) {
           continue; // arg, not an intermediate
+        }
+        if (molaRootsAtConstant(in)) {
+          continue; // constant/weight — pinning it would miscompile
         }
         auto rt = dyn_cast<RankedTensorType>(in.getType());
         if (rt && rt.hasStaticShape()) {
