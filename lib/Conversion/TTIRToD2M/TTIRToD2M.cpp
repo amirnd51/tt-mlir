@@ -5661,13 +5661,17 @@ namespace {
 // onto the adapted operands at layout time — tagging producer values here would
 // be lost to dialect-conversion remapping for intermediates.
 static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+  // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
+  // default — they cut DRAM traffic (QKV reuse -50%, dim=2048 block -18%) while
+  // staying decode-exact, and are budget-bounded (candidates that don't fit L1
+  // are skipped, never overflow). Opt out per-optimization with =0.
   const bool pinInput = [] {
     const char *e = ::getenv("MOLA_TT_L1_PIN_REUSE");
-    return e && e[0] == '1';
+    return !(e && e[0] == '0');
   }();
   const bool pinOutput = [] {
     const char *e = ::getenv("MOLA_TT_FUSE_DRAM");
-    return e && e[0] == '1';
+    return !(e && e[0] == '0');
   }();
   if (!pinInput && !pinOutput) {
     return;
