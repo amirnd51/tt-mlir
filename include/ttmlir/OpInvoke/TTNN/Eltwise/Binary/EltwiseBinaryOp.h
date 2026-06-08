@@ -50,7 +50,8 @@ callEltwiseBinary(CallType callType,
     return createEltwiseBinaryTuple(tag, eltwiseBinaryOpT, lhs, rhs, params);
   };
 
-  return callOp<EltwiseBinaryOpResult>(eltwiseBinaryOp, callType, makeTuple, device);
+  return callOp<EltwiseBinaryOpResult>(eltwiseBinaryOp, callType, makeTuple,
+                                       device);
 }
 
 } // namespace ttnn_op_invoke

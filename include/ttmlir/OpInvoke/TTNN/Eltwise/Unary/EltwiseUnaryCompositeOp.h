@@ -59,7 +59,8 @@ callEltwiseUnaryComposite(CallType callType,
                                             input, params);
   };
 
-  return callOp<EltwiseUnaryCompositeOpResult>(ttnnOp, callType, makeTuple, device);
+  return callOp<EltwiseUnaryCompositeOpResult>(ttnnOp, callType, makeTuple,
+                                               device);
 }
 
 template <typename Tag>
@@ -90,7 +91,8 @@ callEltwiseUnaryCompositeWithFastAndApproximateMode(
         tag, eltwiseUnaryCompositeOpT, input, params);
   };
 
-  return callOp<EltwiseUnaryCompositeOpResult>(ttnnOp, callType, makeTuple, device);
+  return callOp<EltwiseUnaryCompositeOpResult>(ttnnOp, callType, makeTuple,
+                                               device);
 }
 
 struct EltwiseUnaryCompositeClampScalarResolvedParams {

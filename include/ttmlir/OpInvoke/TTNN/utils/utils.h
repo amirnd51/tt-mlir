@@ -71,8 +71,6 @@ Result callOp(auto op, CallType callType, auto makeTuple,
           " yet";
       return response;
     }
-    // op is already a WRAP_OP-style callable (wrapped at the call site), so it
-    // is forwarded directly without re-wrapping.
     return std::apply(
         [&](auto &&...args) {
           return ::ttnn::graph::query_op_constraints(
