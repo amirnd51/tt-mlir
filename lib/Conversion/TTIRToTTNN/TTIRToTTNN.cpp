@@ -2056,12 +2056,29 @@ public:
     RankedTensorType outputType = mlir::cast<RankedTensorType>(
         getTypeConverter()->convertType(op.getResult().getType()));
 
+    // The weight above was packed by PrepareConv3dWeightsOp using a C_in_block
+    // of TILE_WIDTH (see the divide-by-TILE_WIDTH in `numCInBlocks`). The
+    // conv3d kernel must read the weight using the *same* C_in_block, otherwise
+    // the input-channel block decomposition disagrees with the packed weight
+    // layout and the result is silently wrong. If we leave the config unset,
+    // TTNN picks its own conservative default (lcm(l1_alignment,
+    // tile_align_factor)), which can be smaller than TILE_WIDTH (e.g. 16 for a
+    // 1x2x2 kernel), so we pin C_in_block here to keep the two in sync. The
+    // remaining parameters are left unset so TTNN derives its defaults for
+    // them.
+    auto conv3dConfigAttr = rewriter.getAttr<ttnn::Conv3dConfigAttr>(
+        /*weights_dtype=*/std::nullopt, /*t_out_block=*/std::nullopt,
+        /*w_out_block=*/std::nullopt, /*h_out_block=*/std::nullopt,
+        /*c_out_block=*/std::nullopt,
+        /*c_in_block=*/static_cast<uint32_t>(TILE_WIDTH),
+        /*compute_with_storage_grid_size=*/std::nullopt);
+
     auto convOp = rewriter.create<ttnn::Conv3dOp>(
         op.getLoc(), outputType, input, reshapedWeight, reshapedBias, device,
         inChannelsAttr, outChannelsAttr, batchSizeAttr, inputDepthAttr,
         inputHeightAttr, inputWidthAttr, kernelSizeAttr, *strideAttr,
-        *paddingAttr, paddingModeAttr, groupsAttr, outputDtypeAttr, nullptr,
-        nullptr);
+        *paddingAttr, paddingModeAttr, groupsAttr, outputDtypeAttr,
+        conv3dConfigAttr, nullptr);
 
     rewriter.replaceOp(op, convOp.getResult());
 
