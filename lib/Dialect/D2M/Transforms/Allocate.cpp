@@ -666,6 +666,93 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     Block &funcBody = funcOp.getBody().front();
     const auto &L1memInfo = memSpaces[ordinal(MemorySpace::DeviceL1)];
 
+    // MOLA local patch (2026-06-08, #126): per-function auto-decision for
+    // disjoint combiner CBs. The iters>=2 in-process re-dispatch corruption is
+    // caused by data-INDEPENDENT combiner generics (matmul/mul/add with >=2
+    // inputs) reusing the same per-core CB-scratch L1 addresses; on re-dispatch
+    // one reads its CB before the sibling finished, picking up stale state.
+    // Giving every combiner a whole-program (disjoint) CB range fixes this
+    // ROBUSTLY, but only when the combiner CB footprint fits L1: small fixtures
+    // (attention/swiglu/qkv, <=18 combiners at dim<=256) fit and get fixed; the
+    // dim=2048 full block (50 combiners ~256KB each) would need ~12MB >> 1.5MB
+    // L1, so it falls back to the windowed reuse that is already decode-exact.
+    // The discriminator is TWO conditions, both physical:
+    //   (1) combiner CB footprint fits a fraction of L1 (else true overflow);
+    //   (2) the program is small enough (maxPos below a threshold) that giving
+    //       combiners whole-program ranges does not disturb the DENSE schedule
+    //       of a large block, where window-64 already separates every concurrent
+    //       parallel sibling. On the dim=2048 block (maxPos~4700) the combiners
+    //       DO fit L1 (~312KB), but whole-program ranges shift the non-combiner
+    //       sibling addresses and reintroduce a clobber the window-64 layout
+    //       avoided — so size, not capacity, is what excludes the block.
+    // Single self-selecting policy: maximal CB isolation when it both fits and
+    // the program is small; windowed reuse otherwise. Override with MOLA_TT_CB_
+    // COMBINER_DISJOINT (0=force off, 1=force on); default = auto.
+    auto alignedAllocBytes = [&](memref::AllocOp allocOp,
+                                 int32_t numBuffers) -> AllocSizeT {
+      return ttmlir::utils::alignUp(
+          numBuffers * getMemrefSizeBytes(allocOp.getType(), device),
+          L1memInfo.alignment);
+    };
+    auto combinerCBBytes = [&](memref::AllocOp allocOp) -> AllocSizeT {
+      if (allocOp->getAttr("d2m.scratch_buffer")) {
+        return alignedAllocBytes(allocOp, 1);
+      }
+      if (allocOp->getAttr("d2m.synchronized_buffer") &&
+          !allocOp->getAttr("d2m.compute_intermediate")) {
+        return alignedAllocBytes(
+            allocOp, allocOp->getAttrOfType<IntegerAttr>("d2m.synchronized_buffer")
+                         .getInt());
+      }
+      return 0;
+    };
+    AllocSizeT combinerFootprint = 0;
+    funcBody.walk([&](d2m::GenericOp g) {
+      if (g.getInputs().size() < 2) {
+        return;
+      }
+      g->walk([&](memref::AllocOp a) { combinerFootprint += combinerCBBytes(a); });
+    });
+    const AllocSizeT l1Capacity = L1memInfo.maxAddress - L1memInfo.baseAddress;
+    // Fraction of L1 the disjoint combiner set may occupy, leaving room for the
+    // non-combiner working set + staging. Tunable via MOLA_TT_CB_DISJOINT_FRAC
+    // (percent). Default 50%.
+    const AllocSizeT disjointFracPct = [] {
+      const char *p = ::getenv("MOLA_TT_CB_DISJOINT_FRAC");
+      return static_cast<AllocSizeT>(p ? atoi(p) : 50);
+    }();
+    // Max program size (sequence positions) for which whole-program combiner
+    // ranges are safe. Above this, the schedule is dense enough that window-64
+    // already isolates concurrent siblings and disjoint combiners only disturb
+    // it. Components: maxPos<=1697; dim=2048 block: ~4700. Tunable via
+    // MOLA_TT_CB_DISJOINT_MAXPOS (default 2500).
+    const SequenceT disjointMaxPos = [] {
+      const char *m = ::getenv("MOLA_TT_CB_DISJOINT_MAXPOS");
+      return static_cast<SequenceT>(m ? atoi(m) : 2500);
+    }();
+    const SequenceT funcMaxPos =
+        static_cast<SequenceT>(analysis.sequencing.positionMap.size());
+    const bool combinerDisjointAuto =
+        combinerFootprint > 0 &&
+        combinerFootprint <= (l1Capacity * disjointFracPct) / 100 &&
+        funcMaxPos <= disjointMaxPos;
+    const bool combinerDisjoint = [&] {
+      const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
+      if (e && e[0] == '0') {
+        return false;
+      }
+      if (e && e[0] == '1') {
+        return true;
+      }
+      return combinerDisjointAuto;
+    }();
+    if (::getenv("MOLA_TT_DUMP_MAXPOS")) {
+      llvm::errs() << "MOLA CB: combinerFootprint=" << combinerFootprint
+                   << " l1Capacity=" << l1Capacity << " maxPos=" << funcMaxPos
+                   << " auto=" << combinerDisjointAuto
+                   << " -> combinerDisjoint=" << combinerDisjoint << "\n";
+    }
+
     LogicalResult result = success();
     funcBody.walk([&](d2m::GenericOp genericOp) {
       SequenceT genericSeqPos = analysis.sequencing[genericOp];
@@ -718,34 +805,24 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               // generics reuse. Window in sequence positions; default 64
               // (~4 generics), MOLA_TT_CB_WINDOW overrides.
               //
-              // MOLA local patch (2026-06-08, #126, OPT-IN MOLA_TT_CB_COMBINER
-              // _DISJOINT=1): the iters>=2 re-dispatch corruption is
-              // parallel-sibling-specific — two data-INDEPENDENT combiner
-              // generics (>=2 inputs: matmul, mul, add) reuse the same per-core
-              // CB-scratch L1 addresses, and on re-dispatch one reads its CB
-              // before fully writing it, picking up the sibling's stale state.
-              // Under the flag, combiners get whole-program (disjoint) CB ranges
-              // and non-combiners a minimal range (max reuse to free L1). This
-              // fixes component-level decode re-dispatch (mul_par/swiglu/attn
-              // it2 -> 1.0) and fits L1, BUT does NOT fix the full dim=2048 block
-              // decode (it still has non-combiner parallel siblings that need
-              // disjoint CBs too -> L1-bound; that needs the kernel CB zero-init
-              // fix). Default OFF: the uniform window-64, single-pass exact.
-              static const bool combinerDisjoint = [] {
-                const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
-                return e && e[0] == '1';
-              }();
+              // Combiner-disjoint policy (see analyzeGenericRegionAllocs head):
+              // non-combiners ALWAYS use the protective window (default 64) so
+              // adjacent parallel branches get distinct CBs; combiners (>=2
+              // inputs) additionally get a whole-program (disjoint) CB range
+              // when `combinerDisjoint` is set (auto-by-L1-capacity, see above).
+              // This robustly fixes the iters>=2 re-dispatch corruption on every
+              // fixture that fits L1 (all components) and falls back to windowed
+              // reuse on the dim=2048 block (already decode-exact that way).
               static const SequenceT win = [] {
                 const char *w = ::getenv("MOLA_TT_CB_WINDOW");
-                return static_cast<SequenceT>(w ? atoi(w)
-                                                : (combinerDisjoint ? 0 : 64));
+                return static_cast<SequenceT>(w ? atoi(w) : 64);
               }();
               SequenceT maxPos = static_cast<SequenceT>(
                   analysis.sequencing.positionMap.size());
+              bool isCombiner =
+                  combinerDisjoint && genericOp.getInputs().size() >= 2;
               SequenceT end =
-                  (combinerDisjoint && genericOp.getInputs().size() >= 2)
-                      ? maxPos
-                      : (genericSeqPos + win);
+                  isCombiner ? maxPos : (genericSeqPos + win);
               ctx.live = {genericSeqPos, end < maxPos ? end : maxPos};
             }
           }
