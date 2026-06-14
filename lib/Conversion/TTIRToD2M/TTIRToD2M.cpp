@@ -4633,6 +4633,15 @@ namespace {
 // onto the adapted operands at layout time — tagging producer values here would
 // be lost to dialect-conversion remapping for intermediates.
 static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+  // MOLA now owns this placement DECISION (lifted into mola::molaPlaceTTActivations,
+  // lib/Conversion/MolaTTPlace.cpp, run by TTBackend before this pipeline). When
+  // MOLA has already decided (it stamps `mola.placement_done` and sets the same
+  // mola.lhs_l1 / mola.in_l1 tags this function would), skip — the fork is pure
+  // REALIZATION (resolveMolaMemSpace honors the tags below). This legacy in-line
+  // mirror is retained only for fork-standalone / non-MOLA callers.
+  if (module->hasAttr("mola.placement_done")) {
+    return;
+  }
   // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
   // default — they cut DRAM traffic (QKV reuse -50%, dim=2048 block -18%) while
   // staying decode-exact, and are budget-bounded (candidates that don't fit L1

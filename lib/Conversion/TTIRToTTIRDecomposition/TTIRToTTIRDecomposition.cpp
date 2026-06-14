@@ -288,6 +288,16 @@ struct DotGeneralToMatmulConversionPattern
         op.getLoc(), RankedTensorType::get(matmulDestinationShape, elementType),
         lhsMatmulInput, rhsMatmulInput);
 
+    // REALIZATION: carry MOLA's placement intent (mola.lhs_l1 etc., set by
+    // mola::molaPlaceTTActivations on the pre-decomposition dot_general) onto the
+    // matmul this op lowers to, so resolveMolaMemSpace honors MOLA's L1 decision.
+    // The decision is MOLA's; the backend just preserves+realizes it.
+    for (mlir::NamedAttribute na : op->getAttrs()) {
+      if (na.getName().strref().starts_with("mola.")) {
+        matmulOp->setAttr(na.getName(), na.getValue());
+      }
+    }
+
     // Reshape the result by unrolling the prod(lhsResultDims) to original
     // lhsResultDims and likewise for rhsResultDims.
 
