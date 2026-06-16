@@ -115,6 +115,17 @@ void createD2MFrontendPipeline(OpPassManager &pm,
     toD2MOptions.collapseTensorsTo2D = options.collapseTensors;
     toD2MOptions.enableMulticastInference = options.enableMulticastInference;
   }
+  // MOLA D2M-emitter hook: run MOLA's own TTIR->D2M emission BEFORE
+  // createTTIRToD2MPass. MOLA emits d2m.* for supported ops; the TTIRToD2M pass
+  // below lowers the remainder (emit-or-delegate). No-op when the option is empty.
+  if (!options.molaPreToD2MPipeline.empty()) {
+    if (mlir::failed(mlir::parsePassPipeline(options.molaPreToD2MPipeline, pm,
+                                             llvm::errs()))) {
+      llvm::errs() << "createD2MFrontendPipeline: failed to parse "
+                      "mola-pre-to-d2m-pipeline='"
+                   << options.molaPreToD2MPipeline << "'\n";
+    }
+  }
   pm.addPass(tt::createTTIRToD2MPass(toD2MOptions));
   // MOLA local hook (2026-05-12): run an out-of-tree per-tensor placement
   // policy right after ttir-to-d2m (tensors now carry MetalLayoutAttr
