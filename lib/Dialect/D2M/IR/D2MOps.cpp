@@ -2820,6 +2820,31 @@ FailureOr<d2m::ParallelizedGeneric> d2m::GenericOp::withParallelization(
         return failure();
       }
       auto operandType = mlir::cast<ShapedType>(operand.get().getType());
+      // (MOLA) Ask before reblocking. reblockShapedType asserts that each new
+      // grid dimension divides the operand's tile count exactly -- a ShapedType
+      // carries one shard shape for every core and cannot express an uneven
+      // split -- and that assert ABORTS the process.
+      //
+      // The precondition was believed unreachable because grid selection picks
+      // divisors. It is reachable: the divisor is chosen against one shape, and
+      // by the time parallelization reblocks, the shape has been through
+      // interval collapse and alignment, so it need not still divide. Measured
+      // on SmolLM-135M, which aborted here at sequence 320 and above with no
+      // user grid override at all.
+      //
+      // This lambda already reports failure for an underivable grid shape, and
+      // every caller handles it, so an unreblockable operand is reported the
+      // same way: the parallelization is declined and the op keeps the grid it
+      // has. A less parallel grid costs performance; an abort costs the compile.
+      if (!d2m::utils::canReblockShapedType(operandType, *reblockedGridShape)) {
+        this->emitOpError()
+            << "withParallelization cannot reblock operand " << operandIndex
+            << " of type " << operandType << " onto grid ["
+            << *reblockedGridShape
+            << "]: the new grid does not evenly divide the operand's tile "
+               "count, and a shard shape is uniform across cores";
+        return failure();
+      }
       reblockedTypes.push_back(
           d2m::utils::reblockShapedType(operandType, *reblockedGridShape));
     }

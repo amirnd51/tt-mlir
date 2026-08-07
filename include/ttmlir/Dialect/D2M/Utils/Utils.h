@@ -40,8 +40,23 @@ inline bool isReductionScalerBuffer(Operation *op) {
   return op && op->hasAttr(kReductionScalerAttr);
 }
 
+// Can `oldType` be reblocked onto `newGridShape` at all?
+//
+// reblockShapedType computes each new shard as (oldGrid[i] * oldShard[i]) /
+// gridDim[i] and asserts that the division is exact -- a ShapedType carries one
+// shard shape for every core and cannot express an uneven split. That assert is
+// a hard precondition: violating it aborts the process, so a caller that cannot
+// guarantee divisibility must ask FIRST rather than try and recover.
+//
+// (MOLA) Added because the precondition was in fact reachable from grid
+// selection: the divisor is chosen against one shape, and by the time reblocking
+// runs the shape has been through interval collapse and alignment, so the
+// divisor need not still divide. See the guarded call sites in
+// D2M/Transforms/GridSelection.cpp.
+bool canReblockShapedType(ShapedType oldType, ArrayRef<int64_t> newGridShape);
+
 // Return a new shaped type by reblocking its device shape to match a new grid
-// shape.
+// shape. PRECONDITION: canReblockShapedType(oldType, newGridShape).
 ShapedType reblockShapedType(ShapedType oldType,
                              ArrayRef<int64_t> newGridShape);
 
