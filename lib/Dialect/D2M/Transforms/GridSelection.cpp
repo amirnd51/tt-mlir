@@ -93,6 +93,20 @@ static void recordGenericConsumer(Operation *user,
     useGeneric = user->getParentOfType<d2m::GenericOp>();
   }
 
+  if (!useGeneric) {
+    // (MOLA diagnostic) name the op that violates the invariant -- the bare
+    // assertion says only that one exists, which is not enough to fix it.
+    llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
+                 << user->getName().getStringRef() << "'\n  consumer : " << *user
+                 << "\n  consumer loc: " << user->getLoc() << "\n";
+    if (user->getNumOperands() > 0) {
+      Value in = user->getOperand(0);
+      llvm::errs() << "  its operand type: " << in.getType() << "\n";
+      if (Operation *def = in.getDefiningOp())
+        llvm::errs() << "  produced by: '" << def->getName().getStringRef()
+                     << "' at " << def->getLoc() << "\n";
+    }
+  }
   TT_assertv(useGeneric,
              "ToLayout result must be used by a single GenericOp, a single "
              "ViewLayout, or a single MaskOp feeding a single GenericOp");
@@ -163,6 +177,7 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
   }
 
   auto outputType = mlir::cast<mlir::RankedTensorType>(toLayoutOp.getType(0));
+
   auto oldLayout =
       mlir::dyn_cast<ttcore::MetalLayoutAttr>(outputType.getEncoding());
   if (!oldLayout) {
@@ -189,6 +204,31 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
       getScalarBridgePaddingTileShape(toLayoutOp, outputType);
   RankedTensorType newTensorType = utils::tensorWithOptimalGrid(
       outputType, ttnnMode, optimalGrid, paddingTileShape);
+
+  // (MOLA) Decline a grid this tensor cannot be reblocked back from.
+  //
+  // Below, the optimal-grid tensor is reblocked to the ORIGINAL grid to keep the
+  // view chain well formed. reblockShapedType asserts that each new grid
+  // dimension divides the old tile count exactly -- a ShapedType has one shard
+  // shape for all cores and cannot express an uneven split -- and that assert
+  // ABORTS the compiler rather than reporting a diagnostic a caller could
+  // recover from.
+  //
+  // The precondition was believed unreachable because selection picks divisors
+  // (see chooseGridForShape's largest-divisor search). It is reachable: the
+  // divisor is chosen against one shape, and by the time we get here the shape
+  // has been through interval collapse and alignment, so it need not still
+  // divide. Observed on SmolLM-135M at sequence 320 and above with no user
+  // override at all.
+  //
+  // Declining is the conservative choice. The op keeps its current grid, which
+  // is trivially reblockable because it is already there. A less parallel grid
+  // costs performance; an abort costs the compile.
+  if (!utils::canReblockShapedType(newTensorType,
+                                   oldLayout.getGridShape(outputType))) {
+    return;
+  }
+
   builder.setInsertionPoint(emptyOp);
 
   // VGM is NOT propagated from the to_layout's input here — the output EmptyOp
@@ -310,6 +350,13 @@ optimizeTTNNMetalLayoutCastOpGrid(ttir::TTNNMetalLayoutCastOp castOp,
 
   if (optimalGrid == outputLayout.getGridShape(outputType)) {
     // Already at target grid shape.
+    return;
+  }
+
+  // (MOLA) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
+  // an inexact split and that assert aborts the compiler. Decline rather than
+  // die; the op keeps the grid it already has.
+  if (!utils::canReblockShapedType(outputType, optimalGrid)) {
     return;
   }
 

@@ -91,6 +91,29 @@ Type getRegionLargestDstElemTypeOrNull(Region &region) {
   return findLargestDstElemType(region);
 }
 
+bool canReblockShapedType(ShapedType oldType, ArrayRef<int64_t> newGridShape) {
+  if (!oldType.hasStaticShape()) {
+    return false;
+  }
+  auto layout = ttcore::getDeviceLayout(oldType);
+  if (!layout) {
+    return false;
+  }
+  ArrayRef<int64_t> oldGridShape = layout.getGridShape(oldType);
+  ArrayRef<int64_t> oldShardShape = layout.getShardShape(oldType);
+  if (newGridShape.size() != oldGridShape.size() ||
+      oldGridShape.size() != oldShardShape.size()) {
+    return false;
+  }
+  for (auto [idx, gridDim] : llvm::enumerate(newGridShape)) {
+    if (gridDim <= 0 ||
+        (oldGridShape[idx] * oldShardShape[idx]) % gridDim != 0) {
+      return false;
+    }
+  }
+  return true;
+}
+
 ShapedType reblockShapedType(ShapedType oldType,
                              ArrayRef<int64_t> newGridShape) {
   TT_assert(oldType.hasStaticShape());
