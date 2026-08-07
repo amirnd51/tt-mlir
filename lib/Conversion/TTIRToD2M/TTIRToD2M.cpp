@@ -2583,6 +2583,38 @@ private:
         def->setAttr("mola.memspace", l1);
       }
     }
+    // MOLA local patch: honor the general `mola.in_l1` marker here too, not
+    // just `mola.lhs_l1`. The elementwise rewriter already does this, but a
+    // matmul-heavy block (grouped-query attention) reaches L1 through THIS
+    // pattern, so a placement expressed on its operands was silently dropped:
+    // measured 1212 mola.in_l1 tags on a GQA block producing byte-identical D2M
+    // (21760 L1 encodings, 13178 remote_load either way). Constants are skipped
+    // for the same reason as elsewhere -- placing a constant fill on this path
+    // degenerates the compute to a passthrough.
+    if (op->hasAttr("mola.in_l1")) {
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      if (::getenv("MOLA_TT_PLACE_DEBUG"))
+        llvm::errs() << "[matmul-in_l1] fired, " << origInputs.size()
+                     << " inputs\n";
+      for (Value in : origInputs) {
+        if (molaRootsAtConstant(in)) {
+          if (::getenv("MOLA_TT_PLACE_DEBUG"))
+            llvm::errs() << "[matmul-in_l1]   skip: roots at constant\n";
+          continue;
+        }
+        if (::getenv("MOLA_TT_PLACE_DEBUG"))
+          llvm::errs() << "[matmul-in_l1]   TAGGED\n";
+        if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(in)) {
+          if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                  barg.getOwner()->getParentOp())) {
+            fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
+          }
+        } else if (mlir::Operation *def = in.getDefiningOp()) {
+          def->setAttr("mola.memspace", l1);
+        }
+      }
+    }
+
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true, noCollapse);
 
@@ -5690,6 +5722,15 @@ namespace {
 // onto the adapted operands at layout time — tagging producer values here would
 // be lost to dialect-conversion remapping for intermediates.
 static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+  // MOLA now owns this placement DECISION (lifted into mola::molaPlaceTTActivations,
+  // lib/Conversion/MolaTTPlace.cpp, run by TTBackend before this pipeline). When
+  // MOLA has already decided (it stamps `mola.placement_done` and sets the same
+  // mola.lhs_l1 / mola.in_l1 tags this function would), skip — the fork is pure
+  // REALIZATION (resolveMolaMemSpace honors the tags below). This legacy in-line
+  // mirror is retained only for fork-standalone / non-MOLA callers.
+  if (module->hasAttr("mola.placement_done")) {
+    return;
+  }
   // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
   // default — they cut DRAM traffic (QKV reuse -50%, dim=2048 block -18%) while
   // staying decode-exact, and are budget-bounded (candidates that don't fit L1
@@ -5705,6 +5746,17 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
   if (!pinInput && !pinOutput) {
     return;
   }
+  // TRAFFIC objective (mirror of mola::costPromoteTraffic in
+  // include/mola/Backends/CostFormula.h). Staging a reused / mcast-re-read /
+  // round-trip operand into on-chip L1 offloads DRAM regardless of dispatch
+  // time — which is exactly why the TIME cost model
+  // (BaselineCostModel::shouldPromoteToTier, used on NVGPU + tt-ttnn) REJECTS
+  // these on dispatch-bound Blackhole (200us dispatch >> transfer) while the
+  // TRAFFIC objective accepts. The budget is the REAL usable L1 (system
+  // descriptor); the mola.target shared.capacity_bytes only TIGHTENS it (min),
+  // so a capacity sweep drives TT placement (spec-sensitivity) while pins never
+  // exceed real L1 — and at the default spec (= real L1) the result is
+  // unchanged. See docs/plans/g1-cost-model-reconciliation-2026-06-09.md.
   int64_t l1Cap = 0;
   if (auto sysDesc = ttcore::getCurrentScopeSystemDesc(module)) {
     if (!sysDesc.getChipDescs().empty()) {
@@ -5712,7 +5764,53 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
           sysDesc.getChipDescs().front().getUsableL1Size());
     }
   }
+  int64_t specCap = 0;
+  double bwGlobal = 0.0, bwDest = 0.0;
+  if (auto tgt = module->getAttrOfType<DictionaryAttr>("mola.target")) {
+    if (auto tiers = dyn_cast_or_null<DictionaryAttr>(tgt.get("tiers"))) {
+      if (auto sh = dyn_cast_or_null<DictionaryAttr>(tiers.get("shared"))) {
+        if (auto cap = dyn_cast_or_null<IntegerAttr>(sh.get("capacity_bytes"))) {
+          specCap = cap.getInt();
+        }
+        if (auto bw = dyn_cast_or_null<FloatAttr>(sh.get("bandwidth_gbps"))) {
+          bwDest = bw.getValueAsDouble();
+        }
+      }
+    }
+    if (auto edges = dyn_cast_or_null<ArrayAttr>(tgt.get("edges"))) {
+      for (Attribute e : edges) {
+        auto ed = dyn_cast<DictionaryAttr>(e);
+        if (!ed) {
+          continue;
+        }
+        auto src = dyn_cast_or_null<StringAttr>(ed.get("src"));
+        auto dst = dyn_cast_or_null<StringAttr>(ed.get("dst"));
+        if (src && dst && src.getValue() == "global" &&
+            dst.getValue() == "shared") {
+          if (auto bw = dyn_cast_or_null<FloatAttr>(ed.get("bandwidth_gbps"))) {
+            bwGlobal = bw.getValueAsDouble();
+          }
+        }
+      }
+    }
+  }
+  // Spec capacity only tightens the real-L1 budget (never grows it); fall back
+  // to the spec when there is no system descriptor.
+  if (specCap > 0 && (l1Cap <= 0 || specCap < l1Cap)) {
+    l1Cap = specCap;
+  }
   if (l1Cap <= 0) {
+    return;
+  }
+  // Binary traffic decision: is the dest (L1) tier traffic-beneficial? With no
+  // bandwidth signal, assume on-chip is beneficial (preserves prior behavior).
+  // bwDest unset -> 10x fallback, matching the cost model. For L1 this is always
+  // true, so the byte result is unchanged; the gate makes the decision
+  // principled + spec-driven and would correctly decline a non-faster dest tier.
+  const bool trafficBeneficial =
+      (bwGlobal <= 0.0) ||
+      ((bwDest > 0.0 ? bwDest : 10.0 * bwGlobal) > bwGlobal);
+  if (!trafficBeneficial) {
     return;
   }
   const int64_t reservePct = [] {

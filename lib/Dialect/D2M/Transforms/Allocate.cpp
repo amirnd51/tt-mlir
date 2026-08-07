@@ -795,6 +795,17 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
           numBuffers =
               allocOp->getAttrOfType<IntegerAttr>("d2m.synchronized_buffer")
                   .getInt();
+        } else if (allocOp->getAttr("d2m.blocking_map")) {
+          // (MOLA patch) Elementwise-fusion intermediate. GenericFusion tags the
+          // producer->consumer handoff buffer inside a fused generic with
+          // d2m.blocking_map (see GenericFusion.cpp: "intermediate buffers that
+          // have no associated generic operand"); InsertScratchBuffers moves the
+          // tag onto the alloc. Such a buffer -- e.g. the exp output that a
+          // fused sqrt reads -- is a real single L1 buffer and needs an address
+          // just like a scratch buffer. Upstream never wired this branch because
+          // enable-elementwise-fusion is off by default; without it D2MAllocate
+          // rejects the alloc ("not tagged with any recognized attributes").
+          numBuffers = 1;
         } else {
           // We can allow this in the future but asserting for now to check it's
           // not used.
