@@ -158,6 +158,16 @@ struct D2MPipelineOptions : public PassPipelineOptions<D2MPipelineOptions> {
                      "per-tensor placement annotation (empty = off)."),
       llvm::cl::init("")};
 
+  // MOLA D2M-emitter hook: a pass-pipeline run BEFORE ttir-to-d2m (on TTIR), so
+  // MOLA can emit d2m.* ops itself for supported ops; createTTIRToD2MPass then
+  // lowers the remainder (emit-or-delegate). Empty = off; the named pass must be
+  // in the global pass registry at runtime.
+  Option<std::string> molaPreToD2MPipeline{
+      *this, "mola-pre-to-d2m-pipeline",
+      llvm::cl::desc("Pass-pipeline run before ttir-to-d2m for MOLA's own "
+                     "TTIR->D2M emission (empty = off)."),
+      llvm::cl::init("")};
+
   // The allocator will not consider generic outputs eligible for spilling
   // unless this option is turned on.
   Option<bool> allowL1OutputSpilling{
