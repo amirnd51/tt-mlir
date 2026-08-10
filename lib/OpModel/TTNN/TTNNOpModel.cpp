@@ -3,6 +3,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 #include "ttmlir/OpModel/TTNN/TTNNOpModel.h"
+
+// DialectResourceBlobHandle is only forward-declared by BuiltinAttributes.h;
+// reading a resource blob needs its definition.
+#include "mlir/IR/DialectResourceBlobManager.h"
+
+#include <cstring>
 #include "ttmlir/Utils.h"
 
 #include "llvm/ADT/SmallVector.h"
@@ -488,6 +494,33 @@ getRawDataFromElementsAttr(mlir::ElementsAttr attr) {
     auto splatValue = splatAttr.getSplatValue<T>();
     auto numElements = splatAttr.getType().getNumElements();
     result.resize(numElements, splatValue);
+  } else if (auto resourceAttr =
+                 llvm::dyn_cast<mlir::DenseResourceElementsAttr>(attr)) {
+    // Weights imported from PyTorch arrive as DenseResourceElementsAttr: the
+    // importer keeps bulk data out-of-line instead of inlining megabytes of hex
+    // into the IR. Without this branch the optimizer cannot read a single real
+    // checkpoint constant.
+    mlir::ShapedType shapedType = resourceAttr.getType();
+    if (!isCompatibleType<T>(shapedType.getElementType())) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Element type mismatch");
+    }
+    mlir::AsmResourceBlob *blob = resourceAttr.getRawHandle().getBlob();
+    if (!blob) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "resource blob is not available");
+    }
+    llvm::ArrayRef<char> data = blob->getData();
+    const int64_t numElements = shapedType.getNumElements();
+    // Size-checked rather than trusted: the blob is raw host bytes, so a
+    // mismatch would otherwise be read as whatever follows it in memory.
+    if (data.size() != static_cast<size_t>(numElements) * sizeof(T)) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "resource blob size does not match "
+                                     "element count");
+    }
+    result.resize(numElements);
+    std::memcpy(result.data(), data.data(), data.size());
   } else {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "Unsupported ElementsAttr type");
@@ -523,6 +556,35 @@ getRawDataFromElementsAttr<bfloat16>(mlir::ElementsAttr attr) {
         static_cast<uint16_t>(splatValue.bitcastToAPInt().getZExtValue());
     auto numElements = splatAttr.getType().getNumElements();
     result.resize(numElements, bfloat16(rawBits));
+  } else if (auto resourceAttr =
+                 llvm::dyn_cast<mlir::DenseResourceElementsAttr>(attr)) {
+    // See the note in the generic template: real checkpoints store their
+    // weights out-of-line, and bf16 is the dtype they arrive in.
+    if (!resourceAttr.getType().getElementType().isBF16()) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "Element type mismatch - expected BF16");
+    }
+    mlir::AsmResourceBlob *blob = resourceAttr.getRawHandle().getBlob();
+    if (!blob) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "resource blob is not available");
+    }
+    llvm::ArrayRef<char> data = blob->getData();
+    const int64_t numElements = resourceAttr.getType().getNumElements();
+    if (data.size() != static_cast<size_t>(numElements) * sizeof(uint16_t)) {
+      return llvm::createStringError(llvm::inconvertibleErrorCode(),
+                                     "resource blob size does not match "
+                                     "element count");
+    }
+    result.reserve(numElements);
+    for (int64_t i = 0; i < numElements; ++i) {
+      uint16_t rawBits;
+      // memcpy rather than a reinterpret_cast read: the blob carries no
+      // alignment guarantee for uint16_t.
+      std::memcpy(&rawBits, data.data() + i * sizeof(uint16_t),
+                  sizeof(uint16_t));
+      result.emplace_back(rawBits);
+    }
   } else {
     return llvm::createStringError(llvm::inconvertibleErrorCode(),
                                    "Unsupported ElementsAttr type");
@@ -8904,13 +8966,18 @@ llvm::Expected<size_t> OpModel<mlir::tt::ttnn::DropoutOp>::getOpRuntime(
 //   2. Some of them are specialized for ConstantOp.
 
 mlir::Type getElementType(mlir::ElementsAttr value) {
-  if (auto denseAttr = dyn_cast<mlir::DenseElementsAttr>(value)) {
-    return denseAttr.getType().getElementType();
+  // Every ElementsAttr carries a ShapedType, so ask it rather than enumerating
+  // subclasses. The previous form special-cased DenseElementsAttr and
+  // SplatElementsAttr and asserted on anything else, which made the optimizer
+  // unusable on real checkpoints: weights imported from PyTorch arrive as
+  // DenseResourceElementsAttr (the importer stores bulk data out-of-line rather
+  // than inlining megabytes of hex into the IR), so enabling the optimizer on
+  // any HuggingFace model aborted in this function.
+  if (auto shapedType = dyn_cast<mlir::ShapedType>(value.getType())) {
+    return shapedType.getElementType();
   }
-  if (auto splatAttr = llvm::dyn_cast<mlir::SplatElementsAttr>(value)) {
-    return splatAttr.getType().getElementType();
-  }
-  assert(false && "Unknown constant value attribute type");
+  assert(false && "constant value attribute has no shaped type");
+  return {};
 }
 
 ::ttnn::Shape getShape(mlir::ElementsAttr value) {
