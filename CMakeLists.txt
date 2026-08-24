@@ -186,11 +186,17 @@ include(TTMLIRPythonSitePackages)
 add_subdirectory(third_party)
 if (TTMLIR_ENABLE_STABLEHLO)
   set(STABLEHLO_BUILD_EMBEDDED ON)
-  # MOLA F3 (2026-05-12): MOLA's LLVM install was built without
-  # MLIR_ENABLE_BINDINGS_PYTHON, so MLIRPythonSources / MLIRPythonExtension
-  # targets don't exist. The C++ compile chain doesn't need Python
-  # bindings; force OFF to allow STABLEHLO=ON without Python deps.
-  set(STABLEHLO_ENABLE_BINDINGS_PYTHON OFF)
+  # MOLA F3 (2026-05-12), REVISED 2026-08-24: this used to force OFF because
+  # MOLA's build/llvm-install had no MLIR_ENABLE_BINDINGS_PYTHON, so
+  # MLIRPythonSources / MLIRPythonExtension did not exist. MOLA commit 7629a61
+  # turned those bindings ON (upstream stablehlo's
+  # mlir_configure_python_dev_packages needs them), so the guard is now not only
+  # unnecessary but harmful: with it OFF, stablehlo never defines
+  # StablehloPythonSources / StablehloPythonExtensions, and tt-mlir's own
+  # python/CMakeLists.txt:247 (add_mlir_python_common_capi_library) dies with
+  #   get_target_property() called with non-existent target
+  #   "StablehloPythonSources"
+  set(STABLEHLO_ENABLE_BINDINGS_PYTHON ON)
   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/shardy)
   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/shardy)
   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/stablehlo)
