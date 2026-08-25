@@ -3108,8 +3108,10 @@ public:
     // Check if we should do sub-tile H/W concat in the row-major layout.
     bool concatRowMajor = false;
     bool transposeRowMajor = false;
-    const int32_t alignToElements =
-        d2m::utils::getNocElementAlignmentL1(op, outType);
+    // (The NoC element-alignment probe that lived here is gone: the widened
+    // transposeRowMajor condition below subsumes it -- every row-major width
+    // concat now takes the transpose path, so there is nothing left to decide.
+    // Removed rather than left unused, since tt-mlir builds with -Werror.)
 
     if (dim >= rank - 2) {
       const int64_t tileSize =
@@ -3128,8 +3130,21 @@ public:
         // For a row-major width concat, if at least one (including the last)
         // row's size violates the NoC constraints, use the
         // transpose-concat-transpose trick.
-        if (rank >= 2 && concatRowMajor && (dim == rank - 1) &&
-            (dimSize % alignToElements != 0)) {
+        //
+        // MOLA 2026-08-25 (second defect). The NoC-element test alone is not
+        // sufficient here either. A width concat whose pieces are NoC-aligned
+        // but NOT TILE-aligned takes the plain row-major CompositeView path and
+        // returns garbage -- cat(x[..., :40], x[..., 40:]), an identity, comes
+        // back at 0.53 against TTNN's 1.00000.
+        //
+        // This was tried ONCE BEFORE and made things worse (0.78 -> 0.53),
+        // which is why it was reverted. That attempt was made while the slice
+        // rewrite above still mis-lowered non-tile-aligned START offsets, so
+        // the transposed inputs feeding the concat were themselves corrupt and
+        // the fallback could not have worked. With that fixed (standalone
+        // x[..., 40:] now measures 1.00000), the transpose path is worth
+        // re-testing on inputs that are actually correct.
+        if (rank >= 2 && concatRowMajor && (dim == rank - 1)) {
           transposeRowMajor = true;
           break;
         }
@@ -4851,7 +4866,31 @@ public:
         d2m::utils::getNocElementAlignmentL1(op, inType);
 
     // Assume all shards in L1 already start at aligned addresses.
-    const bool isAlignedWidth = begins[rank - 1] % alignToElements == 0;
+    //
+    // MOLA 2026-08-25: the WIDTH predicate must ALSO require TILE alignment, not
+    // just NoC-element alignment. Declaring a width slice "NoC friendly" makes
+    // this pattern return failure() below and hands the slice to the default
+    // lowering, which needs the start offset on a tile boundary. For bf16
+    // alignToElements is 8 (16 NoC bytes / 2), so offsets like 40 and 48 pass the
+    // old test, take the default path, and come back UNCORRELATED:
+    //
+    //   x[..., 40:]  d2m -0.00349   ttnn 1.00000
+    //   x[..., 48:]  d2m -0.00175   ttnn 1.00000
+    //   x[..., 32:]  d2m  1.00000   ttnn 1.00000   (tile-aligned, fine)
+    //
+    // The slice WIDTH is irrelevant: x[..., :40] and x[..., :48] are exact. Only
+    // a non-tile-aligned START offset breaks. That is why RoPE's rotate_half,
+    // cat(-x[..., h:], x[..., :h]), corrupts attention exactly when head_dim/2 is
+    // not a multiple of 32 -- phi2 splits its 32 rotary channels at 16 and scores
+    // 0.708, while gemma2 (256 -> 128) is clean.
+    //
+    // HEIGHT is deliberately NOT tightened: height slices at non-tile-aligned
+    // offsets are exact (rows 40 and 48 both measure 1.00000), so the
+    // transpose-slice-transpose fallback that this now allows is a correct
+    // repair and not merely a different broken path.
+    const int64_t sliceTileWidth = ttcore::TileType::getDefaultShape()[1];
+    const bool isAlignedWidth = (begins[rank - 1] % alignToElements == 0) &&
+                                (begins[rank - 1] % sliceTileWidth == 0);
     const bool isAlignedHeight = begins[rank - 2] % alignToElements == 0;
     const bool notStridedWidth = step[rank - 1] == 1;
     const bool notStridedHeight = step[rank - 2] == 1;
