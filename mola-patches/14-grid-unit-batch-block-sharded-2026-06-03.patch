@@ -1,0 +1,28 @@
+diff --git a/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp b/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
+index 843a4cabb7..cdc2a73270 100644
+--- a/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
++++ b/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
+@@ -224,7 +224,22 @@ bool shouldImplementAsVirtualGrid(mlir::RankedTensorType tensorType,
+   // layouts that have already been normalized to a 2D physical grid stay
+   // VGM-compatible — the VGM maps only the materialized grid dimensions while
+   // the layout keeps the logical-to-physical collapse.
+-  if (physicalShape.size() != 2) {
++  //
++  // MOLA local patch (2026-06-03): leading UNIT dims (a degenerate batch=1,
++  // e.g. a batched dot_general traced from torch) don't make a tensor
++  // meaningfully >2D — sharding only happens on the last two dims, and
++  // computeOptimalBlockShardedGrid already handles rank>2 by sharding the
++  // trailing 2D. Routing batch=1 tensors down the virtual-grid path derived
++  // generic block factors / operand grid extents (e.g. 65/70 on a 64-tile
++  // weight) that real reduction operands cannot reblock to, asserting in
++  // withParallelization (the QKV dim=2048 grid-harmonization failure).
++  // Ignore leading unit dims for this decision; genuinely batched (>1)
++  // tensors keep the virtual-grid path.
++  ArrayRef<int64_t> effShape = physicalShape;
++  while (effShape.size() > 2 && effShape.front() == 1) {
++    effShape = effShape.drop_front();
++  }
++  if (effShape.size() != 2) {
+     return true;
+   }
+   auto blockShardedGrid =

@@ -1,0 +1,33 @@
+diff --git a/lib/Dialect/D2M/Transforms/MarkSynchronizedBuffers.cpp b/lib/Dialect/D2M/Transforms/MarkSynchronizedBuffers.cpp
+index 345a17d0dc..4b699f1133 100644
+--- a/lib/Dialect/D2M/Transforms/MarkSynchronizedBuffers.cpp
++++ b/lib/Dialect/D2M/Transforms/MarkSynchronizedBuffers.cpp
+@@ -12,6 +12,8 @@
+ #include "mlir/Dialect/MemRef/IR/MemRef.h"
+ #include "mlir/IR/PatternMatch.h"
+ 
++#include <cstdlib>
++
+ namespace mlir::tt::d2m {
+ #define GEN_PASS_DEF_D2MMARKSYNCHRONIZEDBUFFERS
+ #include "ttmlir/Dialect/D2M/Transforms/Passes.h.inc"
+@@ -52,7 +54,18 @@ public:
+       for (auto &[cb, usageInfo] : cbUsageInfo) {
+         if (auto allocOp =
+                 mlir::dyn_cast<memref::AllocOp>(cb.getDefiningOp())) {
+-          int32_t bufferCount = numStreamBuffers;
++          // MOLA opt #3 (deeper software pipelining): override the CB prefetch
++          // depth (default 2 = double-buffered) with MOLA_TT_CB_DEPTH so the
++          // reader can prefetch N-1 tiles ahead, hiding more DRAM latency on
++          // latency-bound matmuls. Accumulators still pin to 1 (can't double-
++          // buffer a reduction accumulator).
++          static const int32_t depthOverride = [] {
++            const char *e = ::getenv("MOLA_TT_CB_DEPTH");
++            return e && atoi(e) > 0 ? atoi(e) : 0;
++          }();
++          int32_t bufferCount =
++              depthOverride > 0 ? depthOverride
++                                : static_cast<int32_t>(numStreamBuffers);
+           for (Operation *producer : usageInfo.producers) {
+             if (containsAccumulatingCompute(producer)) {
+               bufferCount = 1;

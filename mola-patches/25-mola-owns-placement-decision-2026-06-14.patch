@@ -1,0 +1,41 @@
+diff --git a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+index 99de64b168..aaacd95396 100644
+--- a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
++++ b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+@@ -4633,6 +4633,15 @@ namespace {
+ // onto the adapted operands at layout time — tagging producer values here would
+ // be lost to dialect-conversion remapping for intermediates.
+ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
++  // MOLA now owns this placement DECISION (lifted into mola::molaPlaceTTActivations,
++  // lib/Conversion/MolaTTPlace.cpp, run by TTBackend before this pipeline). When
++  // MOLA has already decided (it stamps `mola.placement_done` and sets the same
++  // mola.lhs_l1 / mola.in_l1 tags this function would), skip — the fork is pure
++  // REALIZATION (resolveMolaMemSpace honors the tags below). This legacy in-line
++  // mirror is retained only for fork-standalone / non-MOLA callers.
++  if (module->hasAttr("mola.placement_done")) {
++    return;
++  }
+   // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
+   // default — they cut DRAM traffic (QKV reuse -50%, dim=2048 block -18%) while
+   // staying decode-exact, and are budget-bounded (candidates that don't fit L1
+diff --git a/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp b/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
+index 26e262ac8f..a08e9bd4b9 100644
+--- a/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
++++ b/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
+@@ -288,6 +288,16 @@ struct DotGeneralToMatmulConversionPattern
+         op.getLoc(), RankedTensorType::get(matmulDestinationShape, elementType),
+         lhsMatmulInput, rhsMatmulInput);
+ 
++    // REALIZATION: carry MOLA's placement intent (mola.lhs_l1 etc., set by
++    // mola::molaPlaceTTActivations on the pre-decomposition dot_general) onto the
++    // matmul this op lowers to, so resolveMolaMemSpace honors MOLA's L1 decision.
++    // The decision is MOLA's; the backend just preserves+realizes it.
++    for (mlir::NamedAttribute na : op->getAttrs()) {
++      if (na.getName().strref().starts_with("mola.")) {
++        matmulOp->setAttr(na.getName(), na.getValue());
++      }
++    }
++
+     // Reshape the result by unrolling the prod(lhsResultDims) to original
+     // lhsResultDims and likewise for rhsResultDims.
+ 

@@ -1,0 +1,178 @@
+diff --git a/include/ttmlir/Dialect/D2M/Utils/Utils.h b/include/ttmlir/Dialect/D2M/Utils/Utils.h
+index bd079341a8..8bd20673f6 100644
+--- a/include/ttmlir/Dialect/D2M/Utils/Utils.h
++++ b/include/ttmlir/Dialect/D2M/Utils/Utils.h
+@@ -29,8 +29,23 @@ constexpr llvm::StringLiteral kVirtualGridInverseMappingAttr =
+ constexpr llvm::StringLiteral kVirtualGridForwardMappingAttr =
+     "d2m.virtualGridForwardMapping";
+ 
++// Can `oldType` be reblocked onto `newGridShape` at all?
++//
++// reblockShapedType computes each new shard as (oldGrid[i] * oldShard[i]) /
++// gridDim[i] and asserts that the division is exact -- a ShapedType carries one
++// shard shape for every core and cannot express an uneven split. That assert is
++// a hard precondition: violating it aborts the process, so a caller that cannot
++// guarantee divisibility must ask FIRST rather than try and recover.
++//
++// (MOLA) Added because the precondition was in fact reachable from grid
++// selection: the divisor is chosen against one shape, and by the time reblocking
++// runs the shape has been through interval collapse and alignment, so the
++// divisor need not still divide. See the guarded call sites in
++// D2M/Transforms/GridSelection.cpp.
++bool canReblockShapedType(ShapedType oldType, ArrayRef<int64_t> newGridShape);
++
+ // Return a new shaped type by reblocking its device shape to match a new grid
+-// shape.
++// shape. PRECONDITION: canReblockShapedType(oldType, newGridShape).
+ ShapedType reblockShapedType(ShapedType oldType,
+                              ArrayRef<int64_t> newGridShape);
+ 
+diff --git a/lib/Dialect/D2M/IR/D2MOps.cpp b/lib/Dialect/D2M/IR/D2MOps.cpp
+index ce7f016e73..097614d171 100644
+--- a/lib/Dialect/D2M/IR/D2MOps.cpp
++++ b/lib/Dialect/D2M/IR/D2MOps.cpp
+@@ -2626,6 +2626,31 @@ FailureOr<d2m::ParallelizedGeneric> d2m::GenericOp::withParallelization(
+         return failure();
+       }
+       auto operandType = mlir::cast<ShapedType>(operand.get().getType());
++      // (MOLA) Ask before reblocking. reblockShapedType asserts that each new
++      // grid dimension divides the operand's tile count exactly -- a ShapedType
++      // carries one shard shape for every core and cannot express an uneven
++      // split -- and that assert ABORTS the process.
++      //
++      // The precondition was believed unreachable because grid selection picks
++      // divisors. It is reachable: the divisor is chosen against one shape, and
++      // by the time parallelization reblocks, the shape has been through
++      // interval collapse and alignment, so it need not still divide. Measured
++      // on SmolLM-135M, which aborted here at sequence 320 and above with no
++      // user grid override at all.
++      //
++      // This lambda already reports failure for an underivable grid shape, and
++      // every caller handles it, so an unreblockable operand is reported the
++      // same way: the parallelization is declined and the op keeps the grid it
++      // has. A less parallel grid costs performance; an abort costs the compile.
++      if (!d2m::utils::canReblockShapedType(operandType, *reblockedGridShape)) {
++        this->emitOpError()
++            << "withParallelization cannot reblock operand " << operandIndex
++            << " of type " << operandType << " onto grid ["
++            << *reblockedGridShape
++            << "]: the new grid does not evenly divide the operand's tile "
++               "count, and a shard shape is uniform across cores";
++        return failure();
++      }
+       reblockedTypes.push_back(
+           d2m::utils::reblockShapedType(operandType, *reblockedGridShape));
+     }
+diff --git a/lib/Dialect/D2M/Transforms/GridSelection.cpp b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+index 60516b4cc3..1cfe6652ba 100644
+--- a/lib/Dialect/D2M/Transforms/GridSelection.cpp
++++ b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+@@ -93,6 +93,20 @@ static void recordGenericConsumer(Operation *user,
+     useGeneric = user->getParentOfType<d2m::GenericOp>();
+   }
+ 
++  if (!useGeneric) {
++    // (MOLA diagnostic) name the op that violates the invariant -- the bare
++    // assertion says only that one exists, which is not enough to fix it.
++    llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
++                 << user->getName().getStringRef() << "'\n  consumer : " << *user
++                 << "\n  consumer loc: " << user->getLoc() << "\n";
++    if (user->getNumOperands() > 0) {
++      Value in = user->getOperand(0);
++      llvm::errs() << "  its operand type: " << in.getType() << "\n";
++      if (Operation *def = in.getDefiningOp())
++        llvm::errs() << "  produced by: '" << def->getName().getStringRef()
++                     << "' at " << def->getLoc() << "\n";
++    }
++  }
+   TT_assertv(useGeneric,
+              "ToLayout result must be used by a single GenericOp, a single "
+              "ViewLayout, or a single MaskOp feeding a single GenericOp");
+@@ -163,6 +177,7 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
+   }
+ 
+   auto outputType = mlir::cast<mlir::RankedTensorType>(toLayoutOp.getType(0));
++
+   auto oldLayout =
+       mlir::dyn_cast<ttcore::MetalLayoutAttr>(outputType.getEncoding());
+   if (!oldLayout) {
+@@ -189,6 +204,31 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
+       getScalarBridgePaddingTileShape(toLayoutOp, outputType);
+   RankedTensorType newTensorType = utils::tensorWithOptimalGrid(
+       outputType, ttnnMode, optimalGrid, paddingTileShape);
++
++  // (MOLA) Decline a grid this tensor cannot be reblocked back from.
++  //
++  // Below, the optimal-grid tensor is reblocked to the ORIGINAL grid to keep the
++  // view chain well formed. reblockShapedType asserts that each new grid
++  // dimension divides the old tile count exactly -- a ShapedType has one shard
++  // shape for all cores and cannot express an uneven split -- and that assert
++  // ABORTS the compiler rather than reporting a diagnostic a caller could
++  // recover from.
++  //
++  // The precondition was believed unreachable because selection picks divisors
++  // (see chooseGridForShape's largest-divisor search). It is reachable: the
++  // divisor is chosen against one shape, and by the time we get here the shape
++  // has been through interval collapse and alignment, so it need not still
++  // divide. Observed on SmolLM-135M at sequence 320 and above with no user
++  // override at all.
++  //
++  // Declining is the conservative choice. The op keeps its current grid, which
++  // is trivially reblockable because it is already there. A less parallel grid
++  // costs performance; an abort costs the compile.
++  if (!utils::canReblockShapedType(newTensorType,
++                                   oldLayout.getGridShape(outputType))) {
++    return;
++  }
++
+   builder.setInsertionPoint(emptyOp);
+ 
+   // VGM is NOT propagated from the to_layout's input here — the output EmptyOp
+@@ -313,6 +353,13 @@ optimizeTTNNMetalLayoutCastOpGrid(ttir::TTNNMetalLayoutCastOp castOp,
+     return;
+   }
+ 
++  // (MOLA) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
++  // an inexact split and that assert aborts the compiler. Decline rather than
++  // die; the op keeps the grid it already has.
++  if (!utils::canReblockShapedType(outputType, optimalGrid)) {
++    return;
++  }
++
+   auto newTensorType = mlir::cast<RankedTensorType>(
+       utils::reblockShapedType(outputType, optimalGrid));
+ 
+diff --git a/lib/Dialect/D2M/Utils/Utils.cpp b/lib/Dialect/D2M/Utils/Utils.cpp
+index b74feacfeb..f611237969 100644
+--- a/lib/Dialect/D2M/Utils/Utils.cpp
++++ b/lib/Dialect/D2M/Utils/Utils.cpp
+@@ -91,6 +91,29 @@ Type getRegionLargestDstElemTypeOrNull(Region &region) {
+   return findLargestDstElemType(region);
+ }
+ 
++bool canReblockShapedType(ShapedType oldType, ArrayRef<int64_t> newGridShape) {
++  if (!oldType.hasStaticShape()) {
++    return false;
++  }
++  auto layout = ttcore::getDeviceLayout(oldType);
++  if (!layout) {
++    return false;
++  }
++  ArrayRef<int64_t> oldGridShape = layout.getGridShape(oldType);
++  ArrayRef<int64_t> oldShardShape = layout.getShardShape(oldType);
++  if (newGridShape.size() != oldGridShape.size() ||
++      oldGridShape.size() != oldShardShape.size()) {
++    return false;
++  }
++  for (auto [idx, gridDim] : llvm::enumerate(newGridShape)) {
++    if (gridDim <= 0 ||
++        (oldGridShape[idx] * oldShardShape[idx]) % gridDim != 0) {
++      return false;
++    }
++  }
++  return true;
++}
++
+ ShapedType reblockShapedType(ShapedType oldType,
+                              ArrayRef<int64_t> newGridShape) {
+   TT_assert(oldType.hasStaticShape());
