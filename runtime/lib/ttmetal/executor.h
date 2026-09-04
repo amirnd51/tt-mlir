@@ -25,7 +25,15 @@ std::vector<Tensor>
 executeMeshDeviceProgram(::tt::tt_metal::distributed::MeshDevice *meshDevice,
                          const ::tt::target::metal::DeviceProgram *program,
                          const std::vector<Tensor> &inputs,
-                         common::DylibManager &&dylibs);
+                         common::DylibManager &&dylibs,
+                         Binary executableHandle);
+
+// Drop every cached MeshWorkload built for `meshDevice`. Must be called before
+// the device is closed: a cached workload holds tt_metal::Programs bound to
+// that device, and reusing one after a close/reopen would enqueue against a
+// dead device.
+void clearProgramCacheForDevice(
+    const ::tt::tt_metal::distributed::MeshDevice *meshDevice);
 
 } // namespace tt::runtime::ttmetal
 

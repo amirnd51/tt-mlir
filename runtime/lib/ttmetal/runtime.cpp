@@ -336,6 +336,15 @@ void closeMeshDevice(Device parentMesh) {
   ::tt::tt_metal::ReadMeshDeviceProfilerResults(metalMeshDevice);
 #endif
 
+  // Cached MeshWorkloads hold tt_metal::Programs bound to this device. Drop
+  // them before the close, for the parent AND every submesh: submit() executes
+  // against the submesh returned by openDeviceProgramMeshDevice, so that is
+  // what the cache is keyed on.
+  for (const auto &subMesh : metalMeshDevice.get_submeshes()) {
+    clearProgramCacheForDevice(subMesh.get());
+  }
+  clearProgramCacheForDevice(&metalMeshDevice);
+
   metalMeshDevice.close();
 }
 
@@ -1092,7 +1101,8 @@ std::vector<Tensor> submit(Device deviceHandle, Binary executableHandle,
 
     outputs = executeMeshDeviceProgram(deviceProgramMeshDevice[i].get(),
                                        deviceProgram, inputs,
-                                       common::DylibManager(fbb.dylibs()));
+                                       common::DylibManager(fbb.dylibs()),
+                                       executableHandle);
 
     LOG_ASSERT(outputs.size() == program->outputs()->size(),
                "Outputs size mismatch");

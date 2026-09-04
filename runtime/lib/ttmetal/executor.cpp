@@ -28,6 +28,8 @@
 #include "types_generated.h"
 
 #include <cstdint>
+#include <cstdlib>
+#include <mutex>
 #include <string>
 #include <unordered_map>
 
@@ -37,6 +39,73 @@ namespace target = ::tt::target;
 namespace tt_metal = ::tt::tt_metal;
 namespace distributed = ::tt::tt_metal::distributed;
 
+// ---------------------------------------------------------------------------
+// Program cache.
+//
+// Every EnqueueProgramCommand used to rebuild its tt_metal::Program from the
+// flatbuffer's kernel SOURCE STRINGS on each submit -- CreateProgram, create
+// every kernel, create circular buffers and semaphores, then finalize. Kernel
+// binaries are disk-cached, so the first submit costs ~56 ms and later ones
+// settle at ~9 ms; but 9 ms is still 871x the ~10.4 us that the same work costs
+// through ttnn::device_operation::launch on the same device, which reuses a
+// cached Program and only re-enqueues.
+//
+// Reuse is sound here because the built workload cannot differ between submits
+// of the same command. Every runtime-argument kind resolves purely from the
+// static flatbuffer: KernelArgBufferAddress reads bufferRef->address(), which
+// the compiler assigns (createMeshBufferFromBufferRef passes it straight
+// through, it is not a dynamic allocation); semaphore addresses are asserted
+// equal to the flatbuffer's; NamedArgument and Scalar are literals;
+// TensorAccessorArgs derive from those same buffers. So there is no
+// override-runtime-arguments path to get wrong -- a hit replays an identical
+// workload.
+//
+// The entry holds the Binary so the flatbuffer stays alive: the key uses the
+// command pointer, and a freed binary could otherwise let a later allocation
+// reuse that address and collide.
+namespace {
+struct ProgramCacheKey {
+  const void *device;
+  const void *command;
+  bool operator==(const ProgramCacheKey &other) const {
+    return device == other.device && command == other.command;
+  }
+};
+
+struct ProgramCacheKeyHash {
+  std::size_t operator()(const ProgramCacheKey &key) const {
+    return std::hash<const void *>{}(key.device) ^
+           (std::hash<const void *>{}(key.command) << 1);
+  }
+};
+
+struct ProgramCacheEntry {
+  distributed::MeshWorkload workload;
+  Binary binary;
+};
+
+std::mutex &programCacheMutex() {
+  static std::mutex mutex;
+  return mutex;
+}
+
+std::unordered_map<ProgramCacheKey, ProgramCacheEntry, ProgramCacheKeyHash> &
+programCache() {
+  static std::unordered_map<ProgramCacheKey, ProgramCacheEntry,
+                            ProgramCacheKeyHash>
+      cache;
+  return cache;
+}
+
+// Opt-out, so the cache can be A/B'd against the rebuild path on real hardware
+// rather than trusted.
+bool programCacheEnabled() {
+  static const bool enabled =
+      std::getenv("TT_RUNTIME_DISABLE_PROGRAM_CACHE") == nullptr;
+  return enabled;
+}
+} // namespace
+
 namespace {
 class MCQExecutor {
 public:
@@ -45,7 +114,7 @@ public:
       const flatbuffers::Vector<
           flatbuffers::Offset<tt::target::metal::BufferRef>> *programInputs,
       const std::vector<Tensor> &inputs, common::DylibManager &&dylibManager,
-      bool blockingCQ);
+      bool blockingCQ, Binary executableHandle);
 
   const std::vector<Tensor> &getOutputs() const { return outputs; }
 
@@ -71,6 +140,9 @@ private:
   void execute(const target::metal::CreateGlobalSemaphoreCommand *command);
   void execute(const target::metal::ResetGlobalSemaphoreCommand *command);
   void execute(const target::metal::CreateLocalSemaphoreCommand *command);
+
+  void tagAndEnqueueWorkload(distributed::MeshWorkload &meshWorkload,
+                             const char *loc);
 
   std::uint64_t generateUniqueProgramRuntimeId() {
     return nextProgramRuntimeId++;
@@ -98,6 +170,9 @@ private:
   const char *currentProgramName;
   DeviceAddressValidator deviceAddressValidator;
   common::DylibManager dylibManager;
+  // Held only so cached entries can keep the flatbuffer alive; see the program
+  // cache note above.
+  Binary executableHandle;
   std::uint64_t nextProgramRuntimeId = 10000; // Start at a greppable number.
 };
 } // namespace
@@ -107,10 +182,11 @@ MCQExecutor::MCQExecutor(
     const flatbuffers::Vector<flatbuffers::Offset<tt::target::metal::BufferRef>>
         *programInputs,
     const std::vector<Tensor> &inputs, common::DylibManager &&dylibManager,
-    bool blockingCQ)
+    bool blockingCQ, Binary executableHandle)
     : meshDevice(meshDevice), blockingCQ(blockingCQ),
       deviceAddressValidator(meshDevice->get_devices().at(0)),
-      dylibManager(std::move(dylibManager)) {
+      dylibManager(std::move(dylibManager)),
+      executableHandle(std::move(executableHandle)) {
   initMeshEvents.reserve(inputs.size());
 
   std::uint32_t inputIndex = 0;
@@ -362,6 +438,20 @@ void MCQExecutor::execute(const target::metal::EnqueueProgramCommand *command,
   LOG_TRACE(logger::LogRuntimeTTMetalCommand, "Executing program: ", loc, "\n",
             debugInfo);
 
+  // Cache hit: replay the workload built by an earlier submit of this exact
+  // command. See the program cache note at the top of this file for why an
+  // identical rebuild is guaranteed rather than assumed.
+  const ProgramCacheKey cacheKey{static_cast<const void *>(meshDevice),
+                                 static_cast<const void *>(command)};
+  if (programCacheEnabled()) {
+    std::lock_guard<std::mutex> lock(programCacheMutex());
+    auto it = programCache().find(cacheKey);
+    if (it != programCache().end()) {
+      tagAndEnqueueWorkload(it->second.workload, loc);
+      return;
+    }
+  }
+
   auto meshWorkload = distributed::MeshWorkload();
   auto deviceRange = distributed::MeshCoordinateRange(meshDevice->shape());
   for (auto deviceCoord : deviceRange) {
@@ -475,6 +565,25 @@ void MCQExecutor::execute(const target::metal::EnqueueProgramCommand *command,
     }
   }
 
+  if (programCacheEnabled()) {
+    std::lock_guard<std::mutex> lock(programCacheMutex());
+    auto [it, inserted] = programCache().try_emplace(
+        cacheKey,
+        ProgramCacheEntry{std::move(meshWorkload), executableHandle});
+    // Enqueue the STORED workload, not the local one: it was moved from.
+    tagAndEnqueueWorkload(it->second.workload, loc);
+    return;
+  }
+
+  tagAndEnqueueWorkload(meshWorkload, loc);
+}
+
+// The one place a workload is tagged for the profiler and handed to the queue,
+// shared by the cache-hit and rebuild paths so they cannot drift. The runtime
+// id is regenerated on every enqueue, including hits, because it identifies
+// this dispatch rather than the program.
+void MCQExecutor::tagAndEnqueueWorkload(distributed::MeshWorkload &meshWorkload,
+                                        const char *loc) {
   if (perf::Env::get().enablePerfTrace) {
     auto devices = meshDevice->get_devices();
     auto meshShape = meshDevice->shape();
@@ -666,11 +775,13 @@ std::vector<Tensor>
 executeMeshDeviceProgram(distributed::MeshDevice *meshDevice,
                          const target::metal::DeviceProgram *program,
                          const std::vector<Tensor> &inputs,
-                         common::DylibManager &&dylibs) {
+                         common::DylibManager &&dylibs,
+                         Binary executableHandle) {
   LOG_ASSERT(program->command_queues()->size() == 1, "Only one MCQ supported");
 
   MCQExecutor executor(meshDevice, program->inputs(), inputs, std::move(dylibs),
-                       debug::Env::get().blockingCQ);
+                       debug::Env::get().blockingCQ,
+                       std::move(executableHandle));
   for (const target::metal::CommandQueue *cq : *program->command_queues()) {
     FrameMark;
     ZoneScoped;
@@ -686,5 +797,16 @@ executeMeshDeviceProgram(distributed::MeshDevice *meshDevice,
   }
 
   return executor.getOutputs();
+}
+
+void clearProgramCacheForDevice(
+    const tt_metal::distributed::MeshDevice *meshDevice) {
+  std::lock_guard<std::mutex> lock(programCacheMutex());
+  auto &cache = programCache();
+  for (auto it = cache.begin(); it != cache.end();) {
+    it = (it->first.device == static_cast<const void *>(meshDevice))
+             ? cache.erase(it)
+             : std::next(it);
+  }
 }
 } // namespace tt::runtime::ttmetal
