@@ -253,6 +253,69 @@ link there); MOLA carries two runnable integration tests over `mola-c`
 `test/Integration/d2m-aligned-reshape-keeps-dram.mlir`) that pin the operand's
 `to_layout` memory space.
 
+### 34 — D2M arithmetic precision: SFPU multiply, constants as tiles, fp32 reads (2026-09-05)
+
+`34-d2m-precision-sfpu-mul-const-tiles-fp32-unpack-2026-09-05.patch` —
+`lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp`,
+`lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp`,
+`lib/Dialect/D2M/Transforms/ScalarizeConstTensors.cpp`,
+`lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp`,
+`test/ttmlir/Dialect/D2M/Transforms/insert_dst_register_access_bf16_mul_sfpu.mlir` (new),
+`test/ttmlir/Dialect/D2M/scalarize_const_tensors.mlir` (expectations updated)
+
+**The qwen25-1.5b defect** (`progress/tt-d2m-preflight-isolation.md`): the
+D2M path's bf16 arithmetic did not match TTNN's on the same source, and on a
+layer whose attention logits reach 11328 in bf16 one ulp flips a softmax row.
+Three independent causes, each isolated with a bare probe against torch with
+TTNN as the live control (`experiments/tt/probes/qwen/`):
+
+1. **FPU multiply.** A bf16 `tile_mul` ran on the FPU's ELWMUL; its product
+   differed from round-to-nearest-even on 28.11% of random operand pairs
+   (relative error up to 1e-2; no rounding-mode or fidelity-phase model fits)
+   with HiFi4 configured. TTNN's `mul_binary_tile` (SFPU) is exact. Float
+   `tile_mul` is now classified SFPU with both operands staged in DST
+   (`getOperandsLoadFromDstRegister` + `classifyComputeOp`, kept in sync),
+   EXCEPT when an operand is a broadcast (a `tile_bcast`, or at that stage a
+   load whose access map carries a constant index): the SFPU path with a broadcast
+   operand computed TinyLlama's RoPE (`q[1,32,128,64] * cos[1,1,128,64]`)
+   at cosine 0.318 against 0.99999 on the FPU, while the same module on
+   Qwen2.5-1.5B (12 heads of 128) was exact -- a shape-dependent defect in
+   the bcast-into-DST staging that is left on the FPU until understood
+   (that is where tinyllama-1.1b 0.99994 -> 0.98828 and gemma2-2b came
+   from in the first 24-model re-measure). Add/sub stay on the FPU: their
+   results equal TTNN's bit for bit.
+2. **Scalar immediates.** A float multiply by a splat constant was scalarized
+   onto `binop_with_scalar` (`mul_unary_tile`), whose result equals
+   round-toward-zero on 100% of elements; TTNN keeps the constant as a
+   broadcast tile and rounds to nearest even. `ScalarizeConstTensors` now
+   leaves float add/sub/mul/div constants as tiles (integers unchanged).
+3. **f32 reads.** Upstream enables fp32 unpack-to-dest only for typecast
+   kernels and only on CB port 0; every other f32 read goes through the
+   19-bit source register (an f32 identity multiply matched "drop the low 13
+   mantissa bits" on 100% of elements). Now: Fp32 on every port a kernel
+   reads with `copy_tile`, for kernels with no FPU read at all. Extending it
+   to kernels that also have FPU reads produced NaN on whole attention
+   blocks, so those keep Default on every port as before.
+
+Measured on Blackhole (`stage_abs_error.py`, exact per-element comparison
+against torch; D2M / TTNN): bf16 tensor multiply mismatches 28.11% / 0% before,
+0% / 0% after; scalar multiply round-toward-zero before, identical to TTNN
+after; two on-device f32 accumulators multiplied in f32 then cast: D2M and
+TTNN differ on 0.01% of elements after. With MOLA's fp32 matmul accumulation
+(`mola-ttir-matmul-f32-acc`, in the MOLA tree), qwen25-1.5b layer-0 attention
+went 0.96597 -> 0.99062 (TTNN 0.99353) and its softmax probabilities
+0.93893 -> 0.98284 (TTNN 0.98839).
+
+Each change has an A/B switch that restores the upstream behaviour without
+a rebuild: `MOLA_TT_D2M_SFPU_MUL=0`, `MOLA_TT_D2M_CONST_TILES=0`,
+`MOLA_TT_D2M_FP32_UNPACK=0`; the tinyllama bisection above was done with them.
+
+Not verified: the fork's own lit suite (no `ttmlir-opt` link on this box; the
+new test mirrors `insert_dst_register_access_f32_binary.mlir` and the updated
+one inverts the two float scalarization cases). Performance impact of the
+SFPU multiply and the extra constant CB reads is not measured yet; the
+24-model re-measure that follows records it.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —

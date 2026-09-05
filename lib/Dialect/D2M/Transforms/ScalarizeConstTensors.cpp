@@ -21,6 +21,7 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallPtrSet.h"
 
+#include <cstdlib>
 #include <optional>
 
 namespace mlir::tt::d2m {
@@ -159,6 +160,21 @@ static bool isScalarRhsUse(Operation *user, Value arg) {
   auto computeOp = dyn_cast<OperandLoadStoreRegisterOpInterface>(user);
   if (!computeOp || !computeOp.supportsTileOrScalarRhs()) {
     return false;
+  }
+  // Float arithmetic keeps its constant as a tile. The SFPU scalar-immediate
+  // path (binop_with_scalar: mul_unary_tile and friends) truncates its result
+  // into a 16-bit DST -- measured round-toward-zero on 100% of a random bf16
+  // multiply-by-constant (MOLA experiments/tt/probes/qwen/bf16_mul_splat.py,
+  // 2026-09-05) -- while the two-tile SFPU op rounds to nearest even, which
+  // is also what TTNN does (its binary_ng keeps the scalar as a broadcast
+  // tile). Integer scalars are unaffected.
+  const char *constTilesSwitch = std::getenv("MOLA_TT_D2M_CONST_TILES");
+  const bool constTiles = !(constTilesSwitch && constTilesSwitch[0] == '0');
+  if (constTiles && isa<TileAddOp, TileSubOp, TileMulOp, TileDivOp>(user)) {
+    if (auto tile = dyn_cast<ttcore::TileType>(arg.getType());
+        tile && isa<FloatType>(tile.getElementType())) {
+      return false;
+    }
   }
   return user->getNumOperands() >= 2 && user->getOperand(1) == arg;
 }

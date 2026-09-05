@@ -18,6 +18,9 @@
 #include "mlir/IR/AffineMap.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinOps.h"
+#include "mlir/IR/Matchers.h"
+
+#include <cstdlib>
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/SymbolTable.h"
@@ -146,13 +149,34 @@ public:
         }
         // This must stay in-sync with ChipDescAttr::getDstLogicalSizeTiles().
         constexpr bool dstFullSyncEn = false;
-        // Enable fp32 unpack mode for typecast kernels.
-        // TODO(ckaravasilisTT): Enable fp32 unpack mode in the general case.
-        bool isTypecast = kernelContainsTypecast(thread.getKernelSymbol());
-        UnpackToDestMode mode = (fp32DestAccum && isTypecast)
-                                    ? UnpackToDestMode::Fp32
-                                    : UnpackToDestMode::Default;
-        std::vector<UnpackToDestMode> unpackModes{mode};
+        // fp32 unpack-to-dest for the ports a kernel stages into DST with
+        // copy_tile (SFPU reads), when the kernel has no FPU read at all. An
+        // FPU op (matmul, reduce, add/sub/mul_tiles, bcast, tilize,
+        // transpose) takes its operands through srcA/srcB, where a Float32
+        // input is held as Tf32, and a kernel mixing the two modes produced
+        // NaN outputs. Upstream set Fp32 only for typecast kernels and only
+        // on port 0; a Default read of an f32 input drops the low 13 mantissa
+        // bits (MOLA experiments/tt/probes/qwen/f32_identity_mul.py,
+        // 2026-09-05), and a two-input SFPU kernel needs both ports covered.
+        std::vector<UnpackToDestMode> unpackModes(
+            std::max<size_t>(1, cbOperandIndexToPort.size()),
+            UnpackToDestMode::Default);
+        // MOLA_TT_D2M_FP32_UNPACK=0 restores upstream's typecast-only, port-0
+        // rule for an A/B.
+        const char *fp32UnpackSwitch = std::getenv("MOLA_TT_D2M_FP32_UNPACK");
+        const bool fp32Unpack = !(fp32UnpackSwitch && fp32UnpackSwitch[0] == '0');
+        if (fp32DestAccum && !fp32Unpack) {
+          if (kernelContainsTypecast(thread.getKernelSymbol())) {
+            unpackModes[0] = UnpackToDestMode::Fp32;
+          }
+        } else if (fp32DestAccum) {
+          for (unsigned port : sfpuOnlyReadPorts(thread.getKernelSymbol(),
+                                                 cbOperandIndexToPort)) {
+            if (port < unpackModes.size()) {
+              unpackModes[port] = UnpackToDestMode::Fp32;
+            }
+          }
+        }
         kernelConfig = builder.getAttr<ttmetal::ComputeConfigAttr>(
             thread.getKernelSymbol(), coreRange, kernelArgs, mathFidelity,
             fp32DestAccum, dstFullSyncEn, unpackModes);
@@ -293,6 +317,81 @@ private:
         kernelContainsOp<ttkernel::TypecastTileOp>(*symbolTable_, kernelSymbol);
     typecastKernelCache_.try_emplace(kernelName, containsTypecast);
     return containsTypecast;
+  }
+
+  // CB ports the kernel reads only through copy_tile (SFPU staging into
+  // DST), never through an op that computes from srcA/srcB.
+  SmallVector<unsigned>
+  sfpuOnlyReadPorts(SymbolRefAttr kernelSymbol,
+                    const DenseMap<size_t, size_t> &cbOperandIndexToPort) const {
+    auto kernelFunc =
+        symbolTable_->lookup<func::FuncOp>(kernelSymbol.getRootReference());
+    auto spec = kernelFunc->getAttrOfType<ttkernel::ArgSpecAttr>(
+        ttkernel::ArgSpecAttr::name);
+    if (!spec) {
+      return {};
+    }
+    auto portOfArg = [&](ArrayRef<ttkernel::ArgAttr> args,
+                         int64_t argIndex) -> std::optional<unsigned> {
+      if (argIndex < 0 || static_cast<size_t>(argIndex) >= args.size() ||
+          args[argIndex].getArgType() != ttkernel::ArgType::CBPort) {
+        return std::nullopt;
+      }
+      auto it = cbOperandIndexToPort.find(args[argIndex].getOperandIndex());
+      if (it == cbOperandIndexToPort.end()) {
+        return std::nullopt;
+      }
+      return static_cast<unsigned>(it->second);
+    };
+    DenseMap<Value, unsigned> portOfCB;
+    kernelFunc.walk([&](Operation *op) {
+      if (auto get = dyn_cast<ttkernel::GetCommonArgValOp>(op)) {
+        llvm::APInt index;
+        if (matchPattern(get.getArgIndex(), m_ConstantInt(&index))) {
+          if (auto port = portOfArg(spec.getRtArgs(), index.getSExtValue())) {
+            portOfCB[get.getArgVal()] = *port;
+          }
+        }
+      } else if (auto get = dyn_cast<ttkernel::GetCompileArgValOp>(op)) {
+        if (auto port = portOfArg(spec.getCtArgs(), get.getArgIndex())) {
+          portOfCB[get.getResult()] = *port;
+        }
+      }
+    });
+    DenseSet<unsigned> sfpuRead;
+    DenseSet<unsigned> fpuRead;
+    kernelFunc.walk([&](Operation *op) {
+      bool sfpu = isa<ttkernel::CopyTileOp>(op);
+      bool fpu = isa<ttkernel::MatmulTilesOp, ttkernel::MatmulBlockOp,
+                     ttkernel::ExperimentalMatmulBlockOp, ttkernel::ReduceTileOp,
+                     ttkernel::AddTilesOp, ttkernel::SubTilesOp,
+                     ttkernel::MulTilesOp, ttkernel::BinaryDestReuseTilesOp,
+                     ttkernel::UnaryBcastTileOp, ttkernel::TilizeBlockOp,
+                     ttkernel::UntilizeBlockOp,
+                     ttkernel::ExperimentalTilizeBlockOp,
+                     ttkernel::ExperimentalPackUntilizeBlockOp,
+                     ttkernel::TransposeTileOp>(op);
+      if (!sfpu && !fpu) {
+        return;
+      }
+      for (Value operand : op->getOperands()) {
+        auto it = portOfCB.find(operand);
+        if (it == portOfCB.end()) {
+          continue;
+        }
+        (sfpu ? sfpuRead : fpuRead).insert(it->second);
+      }
+    });
+    // Only when the kernel has no FPU read at all. Mixing an unpack-to-dest
+    // port with FPU operands from other ports in the same kernel produced
+    // NaN outputs on whole attention blocks (measured 2026-09-05), so a
+    // kernel that computes anything through srcA/srcB keeps every port in
+    // Default mode, as upstream did.
+    if (!fpuRead.empty()) {
+      return {};
+    }
+    SmallVector<unsigned> ports(sfpuRead.begin(), sfpuRead.end());
+    return ports;
   }
 
   const SymbolTable *symbolTable_;

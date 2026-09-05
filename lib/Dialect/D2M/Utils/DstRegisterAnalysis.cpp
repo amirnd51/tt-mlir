@@ -4,6 +4,11 @@
 
 #include "ttmlir/Dialect/D2M/Utils/DstRegisterAnalysis.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/Matchers.h"
+#include <cstdlib>
+
 #include "ttmlir/Asserts.h"
 #include "ttmlir/Dialect/D2M/IR/D2MGenericRegionOps.h"
 #include "ttmlir/Dialect/D2M/IR/D2MOps.h"
@@ -35,6 +40,42 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
                "expected binary op for tile add/sub/mul");
     Type lhsType = op->getOperand(0).getType();
     Type rhsType = op->getOperand(1).getType();
+    // Float multiplies are SFPU ops (see TileMulOp::getOperandsLoadFromDstRegister
+    // for the measured FPU ELWMUL precision loss); keep this in sync with it.
+    if (mlir::isa<TileMulOp>(op)) {
+      const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+      const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+      // Same broadcast test as TileMulOp::getOperandsLoadFromDstRegister:
+      // a tile_bcast, or a load whose access carries a constant index.
+      auto isBroadcast = [](Value v) {
+        if (v.getDefiningOp<TileBcastOp>()) {
+          return true;
+        }
+        if (auto load = v.getDefiningOp<affine::AffineLoadOp>()) {
+          for (AffineExpr expr : load.getAffineMap().getResults()) {
+            if (mlir::isa<AffineConstantExpr>(expr)) {
+              return true;
+            }
+          }
+          return false;
+        }
+        if (auto load = v.getDefiningOp<memref::LoadOp>()) {
+          for (Value index : load.getIndices()) {
+            if (matchPattern(index, m_Constant())) {
+              return true;
+            }
+          }
+        }
+        return false;
+      };
+      const bool hasBcastOperand =
+          isBroadcast(op->getOperand(0)) || isBroadcast(op->getOperand(1));
+      if (auto tile = mlir::dyn_cast<ttcore::TileType>(lhsType);
+          sfpuMul && !hasBcastOperand && tile &&
+          mlir::isa<FloatType>(tile.getElementType())) {
+        return DstExecutionClass::SFPU;
+      }
+    }
     if (ttcore::getDataType(lhsType) == ttcore::DataType::Float32 ||
         ttcore::getDataType(rhsType) == ttcore::DataType::Float32) {
       return DstExecutionClass::SFPU;
