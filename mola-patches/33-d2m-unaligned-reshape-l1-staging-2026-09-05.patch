@@ -1,0 +1,158 @@
+From 258f6138b06f3fe5dd55411b5dbed1e450ed5ec5 Mon Sep 17 00:00:00 2001
+From: Amir Nassereldine <amirnass@buffalo.edu>
+Date: Sat, 5 Sep 2026 15:19:11 +0000
+Subject: [PATCH] d2m: stage the operand of an unaligned innermost reshape
+ through L1
+
+A ttir.reshape that re-partitions the innermost dimension into or out of
+an extent that is not a multiple of the 32-wide tile is miscompiled when
+its operand lives in DRAM. The view's addresses are correct in every
+inspectable layer (the composed map, the emitted affine index maps
+evaluated over 20480/20480 coordinates), and the DMA coalescing factor,
+grid remapping, tensor collapsing and the DRAM interleaved-vs-sharded
+tag were each eliminated by measurement; what the device reads is each
+row start truncated to a 32-element granule, and the defect is
+DRAM-specific: the identical view over an L1 operand is exact for
+extents 16, 40 and 80 and for the inverse merge (upstream issue #53).
+
+D2MTensorManipulationOpRewriter therefore lays such a reshape's operand
+out in L1 by its own to_layout -- a plain copy under an identity view,
+which is not subject to the defect -- and takes the view over the L1
+buffer. Aligned reshapes and reshapes that keep the innermost extent
+use the role default as before. Extent 20 remains wrong in L1 (0.50), a
+second fault in the same family that no corpus model exercises.
+
+Measured on Blackhole against torch (D2M / TTNN on the same source):
+[1,128,640]->[1,128,16,40] 0.26028 -> 1.00000 / 1.00000; the inverse
+merge 0.27348 -> 1.00000; [1,128,2560]->[1,128,32,80] (phi2's) 0.49870
+-> 1.00000; the aligned [1,128,640]->[1,128,20,32] stays 1.00000 from
+DRAM; the phi2 corpus block 0.90094 -> 0.99967 (TTNN 0.99994). The
+lit test here was not executed on the MOLA box (ttmlir-opt does not
+link there); MOLA carries two runnable integration tests over mola-c
+that pin the operand's to_layout memory space.
+---
+ lib/Conversion/TTIRToD2M/TTIRToD2M.cpp        | 61 ++++++++++++++++++-
+ .../reshape_unaligned_inner_l1_staging.mlir   | 32 ++++++++++
+ 2 files changed, 90 insertions(+), 3 deletions(-)
+ create mode 100644 test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
+
+diff --git a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+index b9737372e8..32d8711347 100644
+--- a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
++++ b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+@@ -4563,9 +4563,45 @@ public:
+     auto origOutputs =
+         createDpsOutputs(op.getLoc(), rewriter, {op.getResult().getType()});
+ 
+-    auto [inputs, outputs] =
+-        toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
+-                                   /*tiled*/ info.canBeTilized);
++    // MOLA local patch 33 (2026-09-05): a reshape that re-partitions the
++    // innermost dimension into or out of an extent that is not a multiple of
++    // the tile width is miscompiled when its operand lives in DRAM -- the
++    // view's addresses are correct in every inspectable layer, but resolving
++    // them against a DRAM-sharded buffer truncates each row start to a
++    // 32-element granule (measured 20480/81920 correct elements for
++    // [1,128,640] -> [1,128,16,40]; the exact source offset that comes back is
++    // s*640 + (h*40 // 32)*32 + j). The same view over an L1 operand is
++    // exact (1.00000 for extents 16, 40 and 80, and for the inverse merge).
++    // So the operand of such a reshape is staged through L1 by its own
++    // to_layout, which is a plain DRAM->L1 copy under an identity view and
++    // therefore not subject to the defect, and the view is taken over the L1
++    // buffer. Aligned reshapes and reshapes that keep the innermost extent
++    // are untouched. Known remaining gap: extent 20 is still wrong in L1
++    // (0.50), a second fault in the same family; no corpus model has it.
++    // Upstream issue #53 carries the full analysis.
++    bool stageInputInL1 = false;
++    if constexpr (std::is_same_v<TensorManipulationOp, ttir::ReshapeOp>) {
++      stageInputInL1 = reshapeRepartitionsInnerDimUnaligned(op) &&
++                       resolveMolaMemSpace(origInputs[0], memorySpaces[0]) ==
++                           ttcore::MemorySpace::DeviceDRAM;
++    }
++
++    std::array<mlir::SmallVector<Value>, 2> laidOut;
++    if (stageInputInL1) {
++      laidOut[0].push_back(createOptimalLayoutOp(
++          origInputs[0], ttcore::MemorySpace::DeviceL1,
++          /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
++      for (Value output : origOutputs) {
++        laidOut[1].push_back(createOptimalLayoutOp(
++            output, resolveMolaMemSpace(output, memorySpaces[1]),
++            /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
++      }
++    } else {
++      laidOut = toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
++                                           /*tiled*/ info.canBeTilized);
++    }
++    auto &inputs = laidOut[0];
++    auto &outputs = laidOut[1];
+     assert(outputs.size() == 1);
+ 
+     auto outTy = mlir::cast<RankedTensorType>(outputs[0].getType());
+@@ -4602,6 +4638,25 @@ public:
+     return success();
+   }
+ 
++  // True when the reshape changes the innermost extent and either side's
++  // innermost extent is not a multiple of the 32-wide tile: the split or
++  // merge whose DRAM addressing is wrong (see patch 33 above).
++  static bool reshapeRepartitionsInnerDimUnaligned(ttir::ReshapeOp op) {
++    auto inputType = mlir::cast<RankedTensorType>(op.getInput().getType());
++    auto outputType = mlir::cast<RankedTensorType>(op.getResult().getType());
++    ArrayRef<int64_t> in = inputType.getShape();
++    ArrayRef<int64_t> out = outputType.getShape();
++    if (in.empty() || out.empty()) {
++      return false;
++    }
++    int64_t inInner = in.back(), outInner = out.back();
++    if (inInner == outInner || inInner <= 1 || outInner <= 1) {
++      return false;
++    }
++    constexpr int64_t kTileWidth = 32;
++    return (inInner % kTileWidth != 0) || (outInner % kTileWidth != 0);
++  }
++
+   static AffineMap projectLogicalMapToUnitDeviceSpace(Builder &builder,
+                                                       AffineMap logicalMap) {
+     unsigned outputLogicalRank = logicalMap.getNumDims();
+diff --git a/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir b/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
+new file mode 100644
+index 0000000000..bf75f8fa78
+--- /dev/null
++++ b/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
+@@ -0,0 +1,32 @@
++// RUN: ttmlir-opt --ttcore-register-device --ttir-to-d2m -o %t %s
++// RUN: FileCheck %s --input-file=%t
++//
++// MOLA local patch 33: a reshape that re-partitions the innermost dimension
++// into or out of an extent that is not a multiple of the tile width is
++// miscompiled when its operand lives in DRAM (the view's addresses are correct
++// in every inspectable layer; resolving them against a DRAM-sharded buffer
++// truncates each row start to a 32-element granule). The same view over an L1
++// operand is exact. The operand of such a reshape is therefore laid out in L1
++// by its own to_layout and the view is taken over the L1 buffer; aligned
++// reshapes keep the role default (DRAM inputs here).
++
++// The unaligned split's operand is laid out in L1 ...
++// CHECK-DAG: #ttcore.metal_layout<logical_shape = 1x128x640, {{.*}}, l1, {{.*}}>
++// ... and the aligned split's operand stays in DRAM.
++// CHECK-DAG: #ttcore.metal_layout<logical_shape = 1x64x640, {{.*}}, dram, {{.*}}>
++
++module {
++  // CHECK-LABEL: func.func @split_unaligned
++  func.func @split_unaligned(%arg0: tensor<1x128x640xbf16>) -> tensor<1x128x16x40xbf16> {
++    // CHECK: d2m.view_layout
++    %0 = "ttir.reshape"(%arg0) <{shape = [1 : i32, 128 : i32, 16 : i32, 40 : i32]}> : (tensor<1x128x640xbf16>) -> tensor<1x128x16x40xbf16>
++    return %0 : tensor<1x128x16x40xbf16>
++  }
++
++  // CHECK-LABEL: func.func @split_aligned
++  func.func @split_aligned(%arg0: tensor<1x64x640xbf16>) -> tensor<1x64x20x32xbf16> {
++    // CHECK: d2m.view_layout
++    %0 = "ttir.reshape"(%arg0) <{shape = [1 : i32, 64 : i32, 20 : i32, 32 : i32]}> : (tensor<1x64x640xbf16>) -> tensor<1x64x20x32xbf16>
++    return %0 : tensor<1x64x20x32xbf16>
++  }
++}
+-- 
+2.34.1
+

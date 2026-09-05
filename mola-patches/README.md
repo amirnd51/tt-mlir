@@ -212,6 +212,47 @@ session — `--enable-capacity-demote` remains compile-time-only
 without these reverted patches (lit-tested at
 `test/Conversion/mola-capacity-demote.mlir`).
 
+### 33 — unaligned innermost reshape stages its operand through L1 (2026-09-05)
+
+`33-d2m-unaligned-reshape-l1-staging-2026-09-05.patch` —
+`lib/Conversion/TTIRToD2M/TTIRToD2M.cpp`,
+`test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir`
+
+**The phi2 defect** (`docs/plans/d2m-slice-tile-alignment-2026-08-25.md`, upstream
+issue #53). A `ttir.reshape` that re-partitions the innermost dimension into or
+out of an extent that is not a multiple of the tile width is miscompiled when its
+operand lives in DRAM: the view's addresses are correct in every inspectable
+layer, yet the device reads each row start truncated to a 32-element granule.
+Six hypotheses were eliminated by measurement; the one positive localisation
+is that the identical view over an **L1** operand is exact (extents 16, 40, 80
+and the inverse merge).
+
+The patch does exactly that: `D2MTensorManipulationOpRewriter` lays such a
+reshape's operand out in L1 by its own `to_layout` (a plain copy under an
+identity view, not subject to the defect) and takes the view over the L1
+buffer. Aligned reshapes and reshapes that keep the innermost extent use the
+role default as before. Extent 20 stays wrong in L1 (0.50) — a second fault in
+the same family that no corpus model exercises.
+
+Measured on Blackhole (cosine against torch; TTNN on the identical source):
+
+| reshape | before | after | ttnn |
+|---|---|---|---|
+| `[1,128,640] -> [1,128,16,40]` | 0.26028 | **1.00000** | 1.00000 |
+| `[1,128,16,40] -> [1,128,640]` | 0.27348 | **1.00000** | 1.00000 |
+| `[1,128,2560] -> [1,128,32,80]` (phi2's) | 0.49870 | **1.00000** | 1.00000 |
+| `[1,128,640] -> [1,128,20,32]` (aligned control) | 1.00000 | 1.00000 | 1.00000 |
+| `[1,128,640] -> [1,128,32,20]` (extent 20, known gap) | 0.12887 | 0.50387 | 1.00000 |
+| phi2 block 0, corpus export, auto-grid | 0.90094 | **0.99967** | 0.99994 |
+
+Blast radius on the corpus is exactly phi2 (the 26 cached exports were scanned
+for the predicate). Cost: one extra DRAM->L1 copy per such reshape; phi2 fits.
+The fork's lit test could not be executed on the MOLA box (`ttmlir-opt` does not
+link there); MOLA carries two runnable integration tests over `mola-c`
+(`test/Integration/d2m-unaligned-reshape-l1-staging.mlir`,
+`test/Integration/d2m-aligned-reshape-keeps-dram.mlir`) that pin the operand's
+`to_layout` memory space.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —
