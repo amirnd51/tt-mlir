@@ -4563,9 +4563,45 @@ public:
     auto origOutputs =
         createDpsOutputs(op.getLoc(), rewriter, {op.getResult().getType()});
 
-    auto [inputs, outputs] =
-        toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
-                                   /*tiled*/ info.canBeTilized);
+    // MOLA local patch 33 (2026-09-05): a reshape that re-partitions the
+    // innermost dimension into or out of an extent that is not a multiple of
+    // the tile width is miscompiled when its operand lives in DRAM -- the
+    // view's addresses are correct in every inspectable layer, but resolving
+    // them against a DRAM-sharded buffer truncates each row start to a
+    // 32-element granule (measured 20480/81920 correct elements for
+    // [1,128,640] -> [1,128,16,40]; the exact source offset that comes back is
+    // s*640 + (h*40 // 32)*32 + j). The same view over an L1 operand is
+    // exact (1.00000 for extents 16, 40 and 80, and for the inverse merge).
+    // So the operand of such a reshape is staged through L1 by its own
+    // to_layout, which is a plain DRAM->L1 copy under an identity view and
+    // therefore not subject to the defect, and the view is taken over the L1
+    // buffer. Aligned reshapes and reshapes that keep the innermost extent
+    // are untouched. Known remaining gap: extent 20 is still wrong in L1
+    // (0.50), a second fault in the same family; no corpus model has it.
+    // Upstream issue #53 carries the full analysis.
+    bool stageInputInL1 = false;
+    if constexpr (std::is_same_v<TensorManipulationOp, ttir::ReshapeOp>) {
+      stageInputInL1 = reshapeRepartitionsInnerDimUnaligned(op) &&
+                       resolveMolaMemSpace(origInputs[0], memorySpaces[0]) ==
+                           ttcore::MemorySpace::DeviceDRAM;
+    }
+
+    std::array<mlir::SmallVector<Value>, 2> laidOut;
+    if (stageInputInL1) {
+      laidOut[0].push_back(createOptimalLayoutOp(
+          origInputs[0], ttcore::MemorySpace::DeviceL1,
+          /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+      for (Value output : origOutputs) {
+        laidOut[1].push_back(createOptimalLayoutOp(
+            output, resolveMolaMemSpace(output, memorySpaces[1]),
+            /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+      }
+    } else {
+      laidOut = toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
+                                           /*tiled*/ info.canBeTilized);
+    }
+    auto &inputs = laidOut[0];
+    auto &outputs = laidOut[1];
     assert(outputs.size() == 1);
 
     auto outTy = mlir::cast<RankedTensorType>(outputs[0].getType());
@@ -4600,6 +4636,25 @@ public:
                                           op->getResult(0).getType()));
 
     return success();
+  }
+
+  // True when the reshape changes the innermost extent and either side's
+  // innermost extent is not a multiple of the 32-wide tile: the split or
+  // merge whose DRAM addressing is wrong (see patch 33 above).
+  static bool reshapeRepartitionsInnerDimUnaligned(ttir::ReshapeOp op) {
+    auto inputType = mlir::cast<RankedTensorType>(op.getInput().getType());
+    auto outputType = mlir::cast<RankedTensorType>(op.getResult().getType());
+    ArrayRef<int64_t> in = inputType.getShape();
+    ArrayRef<int64_t> out = outputType.getShape();
+    if (in.empty() || out.empty()) {
+      return false;
+    }
+    int64_t inInner = in.back(), outInner = out.back();
+    if (inInner == outInner || inInner <= 1 || outInner <= 1) {
+      return false;
+    }
+    constexpr int64_t kTileWidth = 32;
+    return (inInner % kTileWidth != 0) || (outInner % kTileWidth != 0);
   }
 
   static AffineMap projectLogicalMapToUnitDeviceSpace(Builder &builder,
