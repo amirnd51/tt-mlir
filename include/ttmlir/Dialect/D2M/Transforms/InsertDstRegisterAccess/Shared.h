@@ -193,6 +193,19 @@ bool isPackerL1AccumulationSupportedDataType(ttcore::DataType dt);
 // gating on `hasTileMatmul`).
 bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
 
+// Returns true iff `loopOp` qualifies for packer L1 accumulation as a
+// reduce-only loop: it contains at least one compute op, every compute op is
+// an FPU `tile_reduce_sum` / `tile_reduce_mean` (additive accumulations whose
+// only DST operand is the running sum), and every result element type is one
+// the packer can accumulate in L1. `tile_reduce_max` is idempotent, not
+// additive, and SFPU reductions do not accumulate through the packer, so
+// neither qualifies. Without L1-acc a reduction whose reduced axis is split
+// across DST flips reloads its running sum from L1 through the unpacker on
+// every flip, and the unpacker truncates f32 to Tf32 on the way.
+//
+// `MOLA_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
+bool isPackerL1AccReduceOnlyLoop(Operation *loopOp);
+
 // Find the closest ancestor reduction loop IV of `acquireDst`, where
 // "reduction" means: no output store recorded in `copyInfos` depends on the
 // loop's induction variable. The closest such loop is the loop whose adjacent
@@ -204,6 +217,17 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
 // not needed for them.
 Value findClosestReductionLoopIVForL1Acc(Operation *acquireDstOp,
                                          const CopyInfoMap &copyInfos);
+
+// Collect every ancestor reduction loop IV of `acquireDst` that qualifies
+// under the rules of `findClosestReductionLoopIVForL1Acc`, in
+// outermost-to-innermost order. The packer must accumulate whenever ANY of
+// these loops is past its first iteration: when a DST-capacity split of the
+// reduced axis nests a second reduction loop inside the blocking loop,
+// triggering on the innermost loop alone re-enters overwrite mode at the
+// start of every outer iteration and discards the partial sum. Empty if no
+// loop qualifies.
+SmallVector<Value> collectReductionLoopIVsForL1Acc(Operation *acquireDstOp,
+                                                   const CopyInfoMap &copyInfos);
 
 // Stamp a pass-allocated scratch slice onto the op's `dst_scratch_index`
 // attribute for the TTKernel lowering to consume.  Today only supports ops
@@ -321,8 +345,10 @@ buildIndices(PatternRewriter &rewriter, Location loc,
              const mlir::IRMapping &irMapper, const DstAccess &access,
              Operation *linalgRoot = nullptr);
 
+// Emit `set_l1_accumulate(any(loopIV != first iteration))` after
+// `acquireDst`, and a reset after the outermost of `loopIVs`' loops.
 void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
-                            AcquireDstOp acquireDst, Value loopIV);
+                            AcquireDstOp acquireDst, ValueRange loopIVs);
 
 // ---------------------------------------------------------------------------
 // Shared orchestration helper

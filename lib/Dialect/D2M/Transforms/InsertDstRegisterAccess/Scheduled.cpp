@@ -321,14 +321,16 @@ struct D2MInsertDstRegisterAccessScheduledRewriter final
         // Consume the scheduled attribute.
         loopOp->removeAttr("d2m.scheduled");
 
-        // Disable packer L1 accumulation when (a) the user disabled it,
-        // (b) there is no tile_matmul that hits the packer L1-acc path,
-        // or (c) the matmul output element type is not one of the
-        // packer-supported native formats (block-float outputs like
-        // bfp_bf8 are not supported and would silently corrupt results).
-        bool disablePackerL1Acc =
-            disableL1Acc || !hasTileMatmul(loopOp) ||
-            !allTileMatmulOutputsSupportPackerL1Acc(loopOp);
+        // Packer L1 accumulation is enabled for two loop shapes: a loop with
+        // a tile_matmul whose outputs are all packer-native formats
+        // (block-float outputs like bfp_bf8 are not supported and would
+        // silently corrupt results), and a reduce-only sum/mean loop, whose
+        // running sum would otherwise be reloaded from L1 through the
+        // truncating unpacker on every DST flip of the reduced axis.
+        const bool matmulL1Acc = hasTileMatmul(loopOp) &&
+                                 allTileMatmulOutputsSupportPackerL1Acc(loopOp);
+        bool disablePackerL1Acc = disableL1Acc || !(matmulL1Acc ||
+                                                    isPackerL1AccReduceOnlyLoop(loopOp));
 
         auto [copyInfos, dstIntermediates] =
             collectDstAccessesScheduled(gOp, *loopRegion, loopOp, dstCapacity);

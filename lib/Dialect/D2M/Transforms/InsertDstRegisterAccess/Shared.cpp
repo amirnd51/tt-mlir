@@ -25,6 +25,7 @@
 #include "llvm/Support/DebugLog.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <type_traits>
 
 #define DEBUG_TYPE "D2MInsertDstRegisterAccess"
@@ -517,6 +518,32 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp) {
   return allSupported;
 }
 
+bool isPackerL1AccReduceOnlyLoop(Operation *loopOp) {
+  if (const char *sw = std::getenv("MOLA_TT_D2M_REDUCE_L1_ACC");
+      sw && sw[0] == '0' && sw[1] == '\0') {
+    return false;
+  }
+  bool sawCompute = false;
+  bool qualifies = true;
+  loopOp->walk([&](OperandLoadStoreRegisterOpInterface computeOp) {
+    sawCompute = true;
+    Operation *op = computeOp.getOperation();
+    if (!mlir::isa<d2m::TileReduceSumOp, d2m::TileReduceMeanOp>(op)) {
+      qualifies = false;
+      return WalkResult::interrupt();
+    }
+    auto tileType =
+        mlir::dyn_cast<ttcore::TileType>(op->getResult(0).getType());
+    if (!tileType ||
+        !isPackerL1AccumulationSupportedDataType(tileType.getDataType())) {
+      qualifies = false;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  return sawCompute && qualifies;
+}
+
 // Returns true iff any store recorded for this region depends on `iv`.
 // "Depends on" includes transitive dependence through subview indices.
 static bool anyOutputStoreDependsOnIV(const CopyInfoMap &copyInfos, Value iv) {
@@ -554,6 +581,32 @@ static std::optional<int64_t> tryGetConstantTripCount(Operation *loopOp) {
     return llvm::divideCeil(std::max<int64_t>(0, ub - lb), step);
   }
   return std::nullopt;
+}
+
+SmallVector<Value> collectReductionLoopIVsForL1Acc(Operation *acquireDstOp,
+                                                   const CopyInfoMap &copyInfos) {
+  // `collectAncestorLoopIVs` returns IVs in outermost-to-innermost order
+  // (it reverses the upward walk).
+  SmallVector<Value> qualifying;
+  for (Value iv : collectAncestorLoopIVs(acquireDstOp)) {
+    Operation *loopOp = getLoopOpForIV(iv);
+    if (!loopOp) {
+      continue;
+    }
+    std::optional<bool> isReduction = isReductionBlockingLoop(loopOp);
+    if (isReduction.has_value() && !*isReduction) {
+      continue;
+    }
+    if (!isReduction.has_value() && anyOutputStoreDependsOnIV(copyInfos, iv)) {
+      continue;
+    }
+    std::optional<int64_t> tripCount = tryGetConstantTripCount(loopOp);
+    if (tripCount.has_value() && *tripCount <= 1) {
+      continue;
+    }
+    qualifying.push_back(iv);
+  }
+  return qualifying;
 }
 
 Value findClosestReductionLoopIVForL1Acc(Operation *acquireDstOp,
@@ -1719,16 +1772,36 @@ buildIndices(PatternRewriter &rewriter, Location loc,
 }
 
 void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
-                            AcquireDstOp acquireDst, Value loopIV) {
-  Operation *loopOp = getLoopOpForIV(loopIV);
-  if (!loopOp) {
+                            AcquireDstOp acquireDst, ValueRange loopIVs) {
+  // `loopIVs` is outermost-to-innermost; the reset scopes the sticky packer
+  // state to the outermost reduction loop.
+  Operation *outermostLoopOp = nullptr;
+  for (Value iv : loopIVs) {
+    if (Operation *loopOp = getLoopOpForIV(iv)) {
+      outermostLoopOp = loopOp;
+      break;
+    }
+  }
+  if (!outermostLoopOp) {
     return;
   }
 
   rewriter.setInsertionPointAfter(acquireDst);
-  Value firstIterationValue = getFirstIterationValue(rewriter, loc, loopIV);
-  Value isFirstIteration = rewriter.create<arith::CmpIOp>(
-      loc, arith::CmpIPredicate::eq, loopIV, firstIterationValue);
+  // Accumulate unless every reduction loop is on its first iteration.
+  Value isFirstIteration = nullptr;
+  for (Value loopIV : loopIVs) {
+    if (!getLoopOpForIV(loopIV)) {
+      continue;
+    }
+    Value firstIterationValue = getFirstIterationValue(rewriter, loc, loopIV);
+    Value isFirst = rewriter.create<arith::CmpIOp>(
+        loc, arith::CmpIPredicate::eq, loopIV, firstIterationValue);
+    isFirstIteration = isFirstIteration
+                           ? rewriter.create<arith::AndIOp>(
+                                 loc, isFirstIteration, isFirst)
+                                 .getResult()
+                           : isFirst;
+  }
   Value disableFlag = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
   Value enableFlag = rewriter.create<arith::ConstantOp>(
@@ -1739,7 +1812,7 @@ void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
 
   // Packer L1-acc is sticky. Scope it to the reduction loop so enclosing
   // parallel M/N reblock iterations start from a clean packer state.
-  rewriter.setInsertionPointAfter(loopOp);
+  rewriter.setInsertionPointAfter(outermostLoopOp);
   Value resetFlag = rewriter.create<arith::ConstantOp>(
       loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
   rewriter.create<SetL1AccumulateOp>(loc, resetFlag);
@@ -1775,15 +1848,17 @@ bool insertDstRegisterAccessFinalize(
       /*insertInsideLoop=*/isScfForLoop);
   Value dst = acquireDst.getResult();
 
-  Value l1AccLoopIV = nullptr;
+  SmallVector<Value> l1AccLoopIVs;
   if (!disableL1Acc) {
-    // L1-acc must be triggered by the closest ancestor reduction loop: the
-    // innermost enclosing loop that does NOT index the output store. Outer
-    // parallel loops, and outer loops that only look reduction-like because
-    // the immediate store is to a scratch buffer, are not valid triggers.
-    l1AccLoopIV = findClosestReductionLoopIVForL1Acc(acquireDst.getOperation(),
-                                                     copyInfos);
-    if (!l1AccLoopIV) {
+    // L1-acc must be triggered by the ancestor reduction loops: the enclosing
+    // loops that do NOT index the output store. Outer parallel loops, and
+    // outer loops that only look reduction-like because the immediate store
+    // is to a scratch buffer, are not valid triggers. Every qualifying loop
+    // participates: the packer accumulates unless all of them are on their
+    // first iteration.
+    l1AccLoopIVs = collectReductionLoopIVsForL1Acc(acquireDst.getOperation(),
+                                                   copyInfos);
+    if (l1AccLoopIVs.empty()) {
       LDBG() << "Skipping L1 accumulation insertion: no outer reduction loop "
                 "with trip count > 1";
       disableL1Acc = true;
@@ -1795,7 +1870,7 @@ bool insertDstRegisterAccessFinalize(
 
   // Insert optional L1 accumulation guard.
   if (!disableL1Acc) {
-    insertPackerL1AccGuard(rewriter, loc, acquireDst, l1AccLoopIV);
+    insertPackerL1AccGuard(rewriter, loc, acquireDst, l1AccLoopIVs);
   }
 
   // Fix intermediate DST results.
