@@ -34,6 +34,7 @@ namespace mlir::tt::d2m {
 
 #define GEN_PASS_DEF_D2MALLOCATE
 #include "ttmlir/Dialect/D2M/Transforms/Passes.h.inc"
+#include <limits>
 
 //===----------------------------------------------------------------------===//
 // Helper definitions.
@@ -614,10 +615,37 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
       closure.live.last = i->second;
     }
 
+    // MOLA local patch 40 (2026-09-06): visit the graph in program order, not
+    // in DenseMap order. The loop below inserts every alloc into
+    // `analysis.memrefs`, a MapVector, so the allocator's whole packing order
+    // followed the hash of Operation pointers and therefore the process's
+    // address-space layout: the same bloom-560m input reported a required L1
+    // of 5038080 B in most compiles and 5226496 B in about one in four (with
+    // ASLR off, always the former), and a model at the L1 edge fitted or not
+    // depending on the run. Program position is the order the rest of this
+    // pass reasons in anyway.
+    llvm::SmallVector<Operation *> orderedGraphOps;
+    orderedGraphOps.reserve(livenessJoinGraph.size());
+    for (auto &[op, closure] : livenessJoinGraph) {
+      orderedGraphOps.push_back(op);
+    }
+    llvm::sort(orderedGraphOps, [&](Operation *a, Operation *b) {
+      auto ia = analysis.sequencing.operationMap.find(a);
+      auto ib = analysis.sequencing.operationMap.find(b);
+      const SequenceT pa = ia != analysis.sequencing.operationMap.end()
+                               ? ia->second
+                               : std::numeric_limits<SequenceT>::max();
+      const SequenceT pb = ib != analysis.sequencing.operationMap.end()
+                               ? ib->second
+                               : std::numeric_limits<SequenceT>::max();
+      return pa < pb;
+    });
+
     // TODO(vroubtsov) this is retained from v2, but now there is an opportunity
     // to merge live range and def/use chain calculations into a single step.
     // TODO(vroubtsov) non-recursive impl?
-    for (auto &[op, closure] : livenessJoinGraph) {
+    for (Operation *op : orderedGraphOps) {
+      LivenessClosure &closure = livenessJoinGraph[op];
       closure.live.last = resolve(op, livenessJoinGraph);
 
       // Copy liveness results into our alloc set.
@@ -647,6 +675,52 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     }
 
     TT_ALLOC_DEBUG("collected {} memref context(s)", analysis.memrefs.size());
+
+    // MOLA local patch 40 (2026-09-06): the order in which the planner sees
+    // these contexts is its packing tie-break, and the packing result depends
+    // on it. Upstream left it to DenseMap iteration, i.e. to the hash of
+    // Operation pointers, so the same bloom-560m input reported a required
+    // L1 of 5038080 B in most compiles and 5226496 B in about one in four
+    // (with ASLR off, always the former), and the model fitted or fell back
+    // depending on the run. The default here is L1 size descending with
+    // program order for ties (first-fit-decreasing), which fits bloom where
+    // plain program order does not. MOLA_TT_D2M_ALLOC_ORDER selects another
+    // deterministic policy for an A/B: program, reverse, size, last (last use
+    // descending), span (live range length descending).
+    {
+      const char *policy = ::getenv("MOLA_TT_D2M_ALLOC_ORDER");
+      llvm::StringRef pol = (policy && policy[0]) ? policy : "size";
+      llvm::SmallVector<std::pair<mlir::Value, MemrefValueContext>> entries(
+          analysis.memrefs.begin(), analysis.memrefs.end());
+      llvm::SmallVector<std::size_t> order(entries.size());
+      for (std::size_t i = 0; i < order.size(); ++i) {
+        order[i] = i;
+      }
+      auto l1Size = [&](std::size_t i) {
+        return entries[i].second.allocSize[ordinal(PlannerSpace::Scratch)];
+      };
+      auto live = [&](std::size_t i) { return entries[i].second.live; };
+      llvm::stable_sort(order, [&](std::size_t a, std::size_t b) {
+        if (pol == "reverse") {
+          return a > b;
+        }
+        if (pol == "size") {
+          return l1Size(a) > l1Size(b);
+        }
+        if (pol == "last") {
+          return live(a).last > live(b).last;
+        }
+        if (pol == "span") {
+          return (live(a).last - live(a).first) >
+                 (live(b).last - live(b).first);
+        }
+        return false; // "program": keep the insertion order
+      });
+      analysis.memrefs.clear();
+      for (std::size_t i : order) {
+        analysis.memrefs.insert(entries[i]);
+      }
+    }
     TT_debug(analysis.sequencing.valid());
 
     return success();
