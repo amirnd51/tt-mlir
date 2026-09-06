@@ -316,6 +316,54 @@ one inverts the two float scalarization cases). Performance impact of the
 SFPU multiply and the extra constant CB reads is not measured yet; the
 24-model re-measure that follows records it.
 
+### 35, 36 — recorded in MOLA's `third_party/tt-mlir-patches/README.md`
+
+`35-d2m-reduction-in-dst-f32-relayout-sfpu-bcast-mul-2026-09-06.patch` and
+`36-d2m-dst-slice-pitch-sfpu-bcast-mul-reduce-clamp-2026-09-06.patch` are the
+fork commits between records 34 and 37; their narratives live in the MOLA
+copy of this README (entries ### 35 and ### 36), which is the one the corpus
+measurements cite.
+### 37 — reduce-only sum/mean loops accumulate their partials in L1 through the packer (2026-09-06)
+
+`37-d2m-reduce-l1-acc-2026-09-06.patch` —
+`lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/{Shared.cpp,Scheduled.cpp,Unscheduled.cpp}`,
+`include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h`
+
+**The reduce residual patch 35 left behind.** Patch 35 kept a reduction's
+reduced axis inside one block, but inside the block the axis is still chunked
+by DST capacity: four f32 tiles per flip, six flips for a 768-wide f32 sum.
+Between flips the running sum was stored to L1 and reloaded through the
+unpacker, which holds an f32 tile as Tf32, so every flip truncated the
+accumulator once more (`scf.if` guarded reload in the scheduled DST pass's
+output). A 768-wide f32 sum of squares came out 0.12% low on Blackhole where
+TTNN's FPU sum was 0.014% low. Matmul K blocks never had this problem: their
+loop qualifies for packer L1 accumulation, which adds the DST partial into the
+L1 tile in fp32 and never reloads.
+
+The qualification now also covers reduce-only loops: every compute op a
+`tile_reduce_sum` / `tile_reduce_mean` with a packer-native result type. The
+accumulator reload is dropped and `set_l1_accumulate` is armed from the second
+flip on. `tile_reduce_max` is idempotent and the SFPU reductions do not go
+through the packer, so neither qualifies. `MOLA_TT_D2M_REDUCE_L1_ACC=0`
+restores the reload.
+
+The guard also triggers on every qualifying reduction loop rather than only
+the innermost: when a DST-capacity split nests a second reduction loop inside
+the blocking loop, keying on the innermost alone re-enters overwrite mode at
+the start of each outer iteration and discards the partial. With a single
+qualifying loop, which is every matmul today, the emitted IR is unchanged.
+
+Measured after this patch (Blackhole, first quietbox,
+`experiments/tt/probes/normbias`): `reduce_sum_f32_768` -0.12% -> -0.050%
+(TTNN -0.014%), `reduce_sum_uniform_768` -> -0.016% (TTNN exact),
+`reduce_mean_bf16_768` +0.005% (TTNN -0.19%), `reduce_sum_f32_32` -0.047%
+with a single tile per row, so what remains is the unpacker's Tf32 read of
+the f32 input itself, not the accumulation. LayerNorm, RMSNorm, softmax and
+matmul probes unchanged. The MOLA lit test
+`test/Integration/d2m-reduction-accumulates-in-dst.mlir` checks the guard in
+the scheduled DST pass's output and the reload under the switch. The fork's
+own lit suite is not runnable on this box.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —

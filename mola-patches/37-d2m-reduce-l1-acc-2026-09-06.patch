@@ -1,0 +1,277 @@
+diff --git a/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h b/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
+index 46605da913..b618f55114 100644
+--- a/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
++++ b/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
+@@ -193,6 +193,19 @@ bool isPackerL1AccumulationSupportedDataType(ttcore::DataType dt);
+ // gating on `hasTileMatmul`).
+ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
+ 
++// Returns true iff `loopOp` qualifies for packer L1 accumulation as a
++// reduce-only loop: it contains at least one compute op, every compute op is
++// an FPU `tile_reduce_sum` / `tile_reduce_mean` (additive accumulations whose
++// only DST operand is the running sum), and every result element type is one
++// the packer can accumulate in L1. `tile_reduce_max` is idempotent, not
++// additive, and SFPU reductions do not accumulate through the packer, so
++// neither qualifies. Without L1-acc a reduction whose reduced axis is split
++// across DST flips reloads its running sum from L1 through the unpacker on
++// every flip, and the unpacker truncates f32 to Tf32 on the way.
++//
++// `MOLA_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
++bool isPackerL1AccReduceOnlyLoop(Operation *loopOp);
++
+ // Find the closest ancestor reduction loop IV of `acquireDst`, where
+ // "reduction" means: no output store recorded in `copyInfos` depends on the
+ // loop's induction variable. The closest such loop is the loop whose adjacent
+@@ -205,6 +218,17 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
+ Value findClosestReductionLoopIVForL1Acc(Operation *acquireDstOp,
+                                          const CopyInfoMap &copyInfos);
+ 
++// Collect every ancestor reduction loop IV of `acquireDst` that qualifies
++// under the rules of `findClosestReductionLoopIVForL1Acc`, in
++// outermost-to-innermost order. The packer must accumulate whenever ANY of
++// these loops is past its first iteration: when a DST-capacity split of the
++// reduced axis nests a second reduction loop inside the blocking loop,
++// triggering on the innermost loop alone re-enters overwrite mode at the
++// start of every outer iteration and discards the partial sum. Empty if no
++// loop qualifies.
++SmallVector<Value> collectReductionLoopIVsForL1Acc(Operation *acquireDstOp,
++                                                   const CopyInfoMap &copyInfos);
++
+ // Stamp a pass-allocated scratch slice onto the op's `dst_scratch_index`
+ // attribute for the TTKernel lowering to consume.  Today only supports ops
+ // that need exactly one scratch slice.
+@@ -321,8 +345,10 @@ buildIndices(PatternRewriter &rewriter, Location loc,
+              const mlir::IRMapping &irMapper, const DstAccess &access,
+              Operation *linalgRoot = nullptr);
+ 
++// Emit `set_l1_accumulate(any(loopIV != first iteration))` after
++// `acquireDst`, and a reset after the outermost of `loopIVs`' loops.
+ void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
+-                            AcquireDstOp acquireDst, Value loopIV);
++                            AcquireDstOp acquireDst, ValueRange loopIVs);
+ 
+ // ---------------------------------------------------------------------------
+ // Shared orchestration helper
+diff --git a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Scheduled.cpp b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Scheduled.cpp
+index 69eb493eb2..7a3747c7ef 100644
+--- a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Scheduled.cpp
++++ b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Scheduled.cpp
+@@ -321,14 +321,16 @@ struct D2MInsertDstRegisterAccessScheduledRewriter final
+         // Consume the scheduled attribute.
+         loopOp->removeAttr("d2m.scheduled");
+ 
+-        // Disable packer L1 accumulation when (a) the user disabled it,
+-        // (b) there is no tile_matmul that hits the packer L1-acc path,
+-        // or (c) the matmul output element type is not one of the
+-        // packer-supported native formats (block-float outputs like
+-        // bfp_bf8 are not supported and would silently corrupt results).
+-        bool disablePackerL1Acc =
+-            disableL1Acc || !hasTileMatmul(loopOp) ||
+-            !allTileMatmulOutputsSupportPackerL1Acc(loopOp);
++        // Packer L1 accumulation is enabled for two loop shapes: a loop with
++        // a tile_matmul whose outputs are all packer-native formats
++        // (block-float outputs like bfp_bf8 are not supported and would
++        // silently corrupt results), and a reduce-only sum/mean loop, whose
++        // running sum would otherwise be reloaded from L1 through the
++        // truncating unpacker on every DST flip of the reduced axis.
++        const bool matmulL1Acc = hasTileMatmul(loopOp) &&
++                                 allTileMatmulOutputsSupportPackerL1Acc(loopOp);
++        bool disablePackerL1Acc = disableL1Acc || !(matmulL1Acc ||
++                                                    isPackerL1AccReduceOnlyLoop(loopOp));
+ 
+         auto [copyInfos, dstIntermediates] =
+             collectDstAccessesScheduled(gOp, *loopRegion, loopOp, dstCapacity);
+diff --git a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
+index 465747752e..a664e3c065 100644
+--- a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
++++ b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
+@@ -25,6 +25,7 @@
+ #include "llvm/Support/DebugLog.h"
+ 
+ #include <algorithm>
++#include <cstdlib>
+ #include <type_traits>
+ 
+ #define DEBUG_TYPE "D2MInsertDstRegisterAccess"
+@@ -517,6 +518,32 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp) {
+   return allSupported;
+ }
+ 
++bool isPackerL1AccReduceOnlyLoop(Operation *loopOp) {
++  if (const char *sw = std::getenv("MOLA_TT_D2M_REDUCE_L1_ACC");
++      sw && sw[0] == '0' && sw[1] == '\0') {
++    return false;
++  }
++  bool sawCompute = false;
++  bool qualifies = true;
++  loopOp->walk([&](OperandLoadStoreRegisterOpInterface computeOp) {
++    sawCompute = true;
++    Operation *op = computeOp.getOperation();
++    if (!mlir::isa<d2m::TileReduceSumOp, d2m::TileReduceMeanOp>(op)) {
++      qualifies = false;
++      return WalkResult::interrupt();
++    }
++    auto tileType =
++        mlir::dyn_cast<ttcore::TileType>(op->getResult(0).getType());
++    if (!tileType ||
++        !isPackerL1AccumulationSupportedDataType(tileType.getDataType())) {
++      qualifies = false;
++      return WalkResult::interrupt();
++    }
++    return WalkResult::advance();
++  });
++  return sawCompute && qualifies;
++}
++
+ // Returns true iff any store recorded for this region depends on `iv`.
+ // "Depends on" includes transitive dependence through subview indices.
+ static bool anyOutputStoreDependsOnIV(const CopyInfoMap &copyInfos, Value iv) {
+@@ -556,6 +583,32 @@ static std::optional<int64_t> tryGetConstantTripCount(Operation *loopOp) {
+   return std::nullopt;
+ }
+ 
++SmallVector<Value> collectReductionLoopIVsForL1Acc(Operation *acquireDstOp,
++                                                   const CopyInfoMap &copyInfos) {
++  // `collectAncestorLoopIVs` returns IVs in outermost-to-innermost order
++  // (it reverses the upward walk).
++  SmallVector<Value> qualifying;
++  for (Value iv : collectAncestorLoopIVs(acquireDstOp)) {
++    Operation *loopOp = getLoopOpForIV(iv);
++    if (!loopOp) {
++      continue;
++    }
++    std::optional<bool> isReduction = isReductionBlockingLoop(loopOp);
++    if (isReduction.has_value() && !*isReduction) {
++      continue;
++    }
++    if (!isReduction.has_value() && anyOutputStoreDependsOnIV(copyInfos, iv)) {
++      continue;
++    }
++    std::optional<int64_t> tripCount = tryGetConstantTripCount(loopOp);
++    if (tripCount.has_value() && *tripCount <= 1) {
++      continue;
++    }
++    qualifying.push_back(iv);
++  }
++  return qualifying;
++}
++
+ Value findClosestReductionLoopIVForL1Acc(Operation *acquireDstOp,
+                                          const CopyInfoMap &copyInfos) {
+   // `collectAncestorLoopIVs` returns IVs in outermost-to-innermost order
+@@ -1719,16 +1772,36 @@ buildIndices(PatternRewriter &rewriter, Location loc,
+ }
+ 
+ void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
+-                            AcquireDstOp acquireDst, Value loopIV) {
+-  Operation *loopOp = getLoopOpForIV(loopIV);
+-  if (!loopOp) {
++                            AcquireDstOp acquireDst, ValueRange loopIVs) {
++  // `loopIVs` is outermost-to-innermost; the reset scopes the sticky packer
++  // state to the outermost reduction loop.
++  Operation *outermostLoopOp = nullptr;
++  for (Value iv : loopIVs) {
++    if (Operation *loopOp = getLoopOpForIV(iv)) {
++      outermostLoopOp = loopOp;
++      break;
++    }
++  }
++  if (!outermostLoopOp) {
+     return;
+   }
+ 
+   rewriter.setInsertionPointAfter(acquireDst);
+-  Value firstIterationValue = getFirstIterationValue(rewriter, loc, loopIV);
+-  Value isFirstIteration = rewriter.create<arith::CmpIOp>(
+-      loc, arith::CmpIPredicate::eq, loopIV, firstIterationValue);
++  // Accumulate unless every reduction loop is on its first iteration.
++  Value isFirstIteration = nullptr;
++  for (Value loopIV : loopIVs) {
++    if (!getLoopOpForIV(loopIV)) {
++      continue;
++    }
++    Value firstIterationValue = getFirstIterationValue(rewriter, loc, loopIV);
++    Value isFirst = rewriter.create<arith::CmpIOp>(
++        loc, arith::CmpIPredicate::eq, loopIV, firstIterationValue);
++    isFirstIteration = isFirstIteration
++                           ? rewriter.create<arith::AndIOp>(
++                                 loc, isFirstIteration, isFirst)
++                                 .getResult()
++                           : isFirst;
++  }
+   Value disableFlag = rewriter.create<arith::ConstantOp>(
+       loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+   Value enableFlag = rewriter.create<arith::ConstantOp>(
+@@ -1739,7 +1812,7 @@ void insertPackerL1AccGuard(PatternRewriter &rewriter, Location loc,
+ 
+   // Packer L1-acc is sticky. Scope it to the reduction loop so enclosing
+   // parallel M/N reblock iterations start from a clean packer state.
+-  rewriter.setInsertionPointAfter(loopOp);
++  rewriter.setInsertionPointAfter(outermostLoopOp);
+   Value resetFlag = rewriter.create<arith::ConstantOp>(
+       loc, rewriter.getI32Type(), rewriter.getI32IntegerAttr(0));
+   rewriter.create<SetL1AccumulateOp>(loc, resetFlag);
+@@ -1775,15 +1848,17 @@ bool insertDstRegisterAccessFinalize(
+       /*insertInsideLoop=*/isScfForLoop);
+   Value dst = acquireDst.getResult();
+ 
+-  Value l1AccLoopIV = nullptr;
++  SmallVector<Value> l1AccLoopIVs;
+   if (!disableL1Acc) {
+-    // L1-acc must be triggered by the closest ancestor reduction loop: the
+-    // innermost enclosing loop that does NOT index the output store. Outer
+-    // parallel loops, and outer loops that only look reduction-like because
+-    // the immediate store is to a scratch buffer, are not valid triggers.
+-    l1AccLoopIV = findClosestReductionLoopIVForL1Acc(acquireDst.getOperation(),
+-                                                     copyInfos);
+-    if (!l1AccLoopIV) {
++    // L1-acc must be triggered by the ancestor reduction loops: the enclosing
++    // loops that do NOT index the output store. Outer parallel loops, and
++    // outer loops that only look reduction-like because the immediate store
++    // is to a scratch buffer, are not valid triggers. Every qualifying loop
++    // participates: the packer accumulates unless all of them are on their
++    // first iteration.
++    l1AccLoopIVs = collectReductionLoopIVsForL1Acc(acquireDst.getOperation(),
++                                                   copyInfos);
++    if (l1AccLoopIVs.empty()) {
+       LDBG() << "Skipping L1 accumulation insertion: no outer reduction loop "
+                 "with trip count > 1";
+       disableL1Acc = true;
+@@ -1795,7 +1870,7 @@ bool insertDstRegisterAccessFinalize(
+ 
+   // Insert optional L1 accumulation guard.
+   if (!disableL1Acc) {
+-    insertPackerL1AccGuard(rewriter, loc, acquireDst, l1AccLoopIV);
++    insertPackerL1AccGuard(rewriter, loc, acquireDst, l1AccLoopIVs);
+   }
+ 
+   // Fix intermediate DST results.
+diff --git a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Unscheduled.cpp b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Unscheduled.cpp
+index 8c5a148674..76d52edbcd 100644
+--- a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Unscheduled.cpp
++++ b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Unscheduled.cpp
+@@ -366,14 +366,16 @@ struct D2MInsertDstRegisterAccessUnscheduledRewriter final
+ 
+         loopOp->setAttr("d2m.dst_access_inserted", rewriter.getUnitAttr());
+ 
+-        // Disable packer L1 accumulation when (a) the user disabled it,
+-        // (b) there is no tile_matmul that hits the packer L1-acc path,
+-        // or (c) the matmul output element type is not one of the
+-        // packer-supported native formats (block-float outputs like
+-        // bfp_bf8 are not supported and would silently corrupt results).
+-        bool disablePackerL1Acc =
+-            disableL1Acc || !hasTileMatmul(loopOp) ||
+-            !allTileMatmulOutputsSupportPackerL1Acc(loopOp);
++        // Packer L1 accumulation is enabled for two loop shapes: a loop with
++        // a tile_matmul whose outputs are all packer-native formats
++        // (block-float outputs like bfp_bf8 are not supported and would
++        // silently corrupt results), and a reduce-only sum/mean loop, whose
++        // running sum would otherwise be reloaded from L1 through the
++        // truncating unpacker on every DST flip of the reduced axis.
++        const bool matmulL1Acc = hasTileMatmul(loopOp) &&
++                                 allTileMatmulOutputsSupportPackerL1Acc(loopOp);
++        bool disablePackerL1Acc = disableL1Acc || !(matmulL1Acc ||
++                                                    isPackerL1AccReduceOnlyLoop(loopOp));
+ 
+         auto [copyInfos, dstIntermediates] =
+             collectDstAccesses(gOp, *loopRegion, loopOp, dstCapacity);
