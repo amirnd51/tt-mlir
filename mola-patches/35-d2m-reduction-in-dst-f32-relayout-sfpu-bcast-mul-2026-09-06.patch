@@ -1,0 +1,335 @@
+diff --git a/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h b/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
+index 3d34d6f18b..b6889d15ea 100644
+--- a/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
++++ b/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
+@@ -12,7 +12,9 @@
+ #include "llvm/ADT/DenseMap.h"
+ #include "llvm/ADT/SmallVector.h"
+ 
++#include <cstdint>
+ #include <memory>
++#include <optional>
+ 
+ namespace mlir::tt::d2m {
+ 
+@@ -140,6 +142,10 @@ private:
+       results;
+   llvm::SmallVector<int64_t> deviceGridShape;
+   bool ttnnMode;
++  // (MOLA) Double-buffered shard budget, in bytes, for an input operand along
++  // a reduction axis; nullopt streams the axis one virtual core per block as
++  // upstream does. See clampReductionSplit in GridAnalysis.cpp.
++  std::optional<uint64_t> reductionShardBudgetBytes;
+ };
+ 
+ } // namespace mlir::tt::d2m
+diff --git a/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp b/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
+index 521d7ce1fe..571b84c1d1 100644
+--- a/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
++++ b/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
+@@ -176,6 +176,25 @@ public:
+               unpackModes[port] = UnpackToDestMode::Fp32;
+             }
+           }
++          // (MOLA, 2026-09-06) A relayout kernel (tilize / untilize and
++          // nothing else) moves an f32 tensor through the FPU datacopy path,
++          // and srcA holds an f32 as Tf32: every f32 tensor D2M wrote back to
++          // the host had its low 13 mantissa bits zero, while the same value
++          // through TTNN was exact (MOLA experiments/tt/probes/normbias/
++          // f32_output_scale, 2026-09-06). TTIRToD2M brackets nearly every
++          // op with such a pair, so each f32 intermediate lost 13 bits per
++          // boundary. tilize_block and pack_untilize_block both take their
++          // datacopy through `UnpackToDestEn`, which tt-metal derives from
++          // these modes, so marking the f32 input port makes the relayout
++          // read 32-bit into DST. Only kernels with no other compute op:
++          // UnpackToDestEn is kernel-wide, and a 16-bit port in the same
++          // kernel would be unpacked to DST as well.
++          for (unsigned port : relayoutFp32SourcePorts(
++                   thread.getKernelSymbol(), cbOperandIndexToPort)) {
++            if (port < unpackModes.size()) {
++              unpackModes[port] = UnpackToDestMode::Fp32;
++            }
++          }
+         }
+         kernelConfig = builder.getAttr<ttmetal::ComputeConfigAttr>(
+             thread.getKernelSymbol(), coreRange, kernelArgs, mathFidelity,
+@@ -319,6 +338,101 @@ private:
+     return containsTypecast;
+   }
+ 
++  // Map every CB value in a kernel (a get_common_arg_val / get_compile_arg_val
++  // result whose ArgSpec entry is a CBPort) to its port.
++  DenseMap<Value, unsigned>
++  cbValuePorts(func::FuncOp kernelFunc,
++               const DenseMap<size_t, size_t> &cbOperandIndexToPort) const {
++    DenseMap<Value, unsigned> portOfCB;
++    auto spec = kernelFunc->getAttrOfType<ttkernel::ArgSpecAttr>(
++        ttkernel::ArgSpecAttr::name);
++    if (!spec) {
++      return portOfCB;
++    }
++    auto portOfArg = [&](ArrayRef<ttkernel::ArgAttr> args,
++                         int64_t argIndex) -> std::optional<unsigned> {
++      if (argIndex < 0 || static_cast<size_t>(argIndex) >= args.size() ||
++          args[argIndex].getArgType() != ttkernel::ArgType::CBPort) {
++        return std::nullopt;
++      }
++      auto it = cbOperandIndexToPort.find(args[argIndex].getOperandIndex());
++      if (it == cbOperandIndexToPort.end()) {
++        return std::nullopt;
++      }
++      return static_cast<unsigned>(it->second);
++    };
++    kernelFunc.walk([&](Operation *op) {
++      if (auto get = dyn_cast<ttkernel::GetCommonArgValOp>(op)) {
++        llvm::APInt index;
++        if (matchPattern(get.getArgIndex(), m_ConstantInt(&index))) {
++          if (auto port = portOfArg(spec.getRtArgs(), index.getSExtValue())) {
++            portOfCB[get.getArgVal()] = *port;
++          }
++        }
++      } else if (auto get = dyn_cast<ttkernel::GetCompileArgValOp>(op)) {
++        if (auto port = portOfArg(spec.getCtArgs(), get.getArgIndex())) {
++          portOfCB[get.getResult()] = *port;
++        }
++      }
++    });
++    return portOfCB;
++  }
++
++  // The source ports of a relayout-only kernel (tilize / untilize block ops
++  // and nothing that computes from srcA/srcB or stages through copy_tile)
++  // whose CB holds a 32-bit float, tile or row-major. Empty for any other
++  // kernel: UnpackToDestEn is kernel-wide, so a 16-bit port in the same
++  // kernel would be unpacked to DST as well.
++  SmallVector<unsigned> relayoutFp32SourcePorts(
++      SymbolRefAttr kernelSymbol,
++      const DenseMap<size_t, size_t> &cbOperandIndexToPort) const {
++    auto kernelFunc =
++        symbolTable_->lookup<func::FuncOp>(kernelSymbol.getRootReference());
++    DenseMap<Value, unsigned> portOfCB =
++        cbValuePorts(kernelFunc, cbOperandIndexToPort);
++    SmallVector<unsigned> ports;
++    bool sawRelayout = false;
++    bool sawOther = false;
++    kernelFunc.walk([&](Operation *op) {
++      if (isa<ttkernel::TilizeBlockOp, ttkernel::ExperimentalTilizeBlockOp,
++              ttkernel::UntilizeBlockOp,
++              ttkernel::ExperimentalPackUntilizeBlockOp>(op)) {
++        sawRelayout = true;
++        if (op->getNumOperands() == 0) {
++          return;
++        }
++        Value source = op->getOperand(0);
++        auto cbType = dyn_cast<ttkernel::CBType>(source.getType());
++        auto it = portOfCB.find(source);
++        if (!cbType || it == portOfCB.end()) {
++          return;
++        }
++        Type elementType = cbType.getElementType();
++        if (auto tileType = dyn_cast<ttcore::TileType>(elementType)) {
++          elementType = tileType.getElementType();
++        }
++        if (isa<FloatType>(elementType) &&
++            elementType.getIntOrFloatBitWidth() == 32 &&
++            !llvm::is_contained(ports, it->second)) {
++          ports.push_back(it->second);
++        }
++      } else if (isa<ttkernel::CopyTileOp, ttkernel::MatmulTilesOp,
++                     ttkernel::MatmulBlockOp,
++                     ttkernel::ExperimentalMatmulBlockOp,
++                     ttkernel::ReduceTileOp, ttkernel::AddTilesOp,
++                     ttkernel::SubTilesOp, ttkernel::MulTilesOp,
++                     ttkernel::BinaryDestReuseTilesOp,
++                     ttkernel::UnaryBcastTileOp, ttkernel::TransposeTileOp>(
++                     op)) {
++        sawOther = true;
++      }
++    });
++    if (!sawRelayout || sawOther) {
++      return {};
++    }
++    return ports;
++  }
++
+   // CB ports the kernel reads only through copy_tile (SFPU staging into
+   // DST), never through an op that computes from srcA/srcB.
+   SmallVector<unsigned>
+diff --git a/lib/Dialect/D2M/Analysis/GridAnalysis.cpp b/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
+index 45e345403a..4ce7f1daad 100644
+--- a/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
++++ b/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
+@@ -11,10 +11,15 @@
+ #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
+ #include "ttmlir/Dialect/TTCore/IR/Utils.h"
+ #include "ttmlir/Dialect/TTIR/IR/TTIROps.h"
++#include "ttmlir/Utils.h"
+ 
+ #include "mlir/IR/BuiltinOps.h"
+ 
++#include "llvm/ADT/StringRef.h"
++#include "llvm/Support/MathExtras.h"
++
+ #include <algorithm>
++#include <cstdlib>
+ 
+ namespace mlir::tt::d2m {
+ 
+@@ -371,6 +376,86 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
+   return inputInfos;
+ }
+ 
++// (MOLA, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
++// whose double-buffered shard fits the budget, not the most.
++//
++// A reduction axis is not parallel work: splitting it into virtual cores only
++// streams the operand through L1 in more, smaller blocks, and between blocks
++// the compute kernel spills its running sum from DST to L1 and reloads it
++// through the unpacker, which holds an f32 tile as Tf32 -- 13 mantissa bits
++// truncated on every reload. Streamed one tile per block, a 768-wide f32 sum
++// came out 0.47% low on Blackhole and a sum of exact ones exact; the same
++// sum inside one block is exact (MOLA experiments/tt/probes/normbias/,
++// reduce_sum_uniform_768 / reduce_sum_ones_768). That truncation is the
++// LayerNorm-low / RMSNorm-high magnitude error of the whole model corpus.
++//
++// Only input operands and only tiled ones are touched; the split must still
++// map onto a legal physical grid. MOLA_TT_D2M_REDUCTION_SPLIT=stream restores
++// the upstream choice for an A/B.
++static void clampReductionSplit(GenericOp genericOp, unsigned operandIndex,
++                                RankedTensorType operandType,
++                                ArrayRef<int64_t> physShape,
++                                ArrayRef<int64_t> targetGrid,
++                                uint64_t budgetBytes, uint32_t numBuffers,
++                                llvm::SmallVectorImpl<int64_t> &grid) {
++  auto tileType =
++      mlir::dyn_cast<ttcore::TileType>(operandType.getElementType());
++  if (!tileType) {
++    return;
++  }
++  if (operandIndex >= genericOp.getOutputs().getBeginOperandIndex()) {
++    return;
++  }
++  SmallVector<ttcore::IteratorType> iteratorTypes =
++      genericOp.getIteratorTypesValue();
++  if (iteratorTypes.empty()) {
++    return;
++  }
++  AffineMap indexingMap = genericOp.getIndexingMapsValue()[operandIndex];
++  if (indexingMap.getNumResults() != grid.size() ||
++      physShape.size() != grid.size()) {
++    return;
++  }
++  const uint64_t tileBytes = tileType.getSizeBytes();
++  for (auto [pos, expr] : llvm::enumerate(indexingMap.getResults())) {
++    auto dimExpr = mlir::dyn_cast<AffineDimExpr>(expr);
++    if (!dimExpr || dimExpr.getPosition() >= iteratorTypes.size() ||
++        iteratorTypes[dimExpr.getPosition()] !=
++            ttcore::IteratorType::Reduction ||
++        grid[pos] <= 1) {
++      continue;
++    }
++    uint64_t otherTiles = 1;
++    int64_t otherGridVolume = 1;
++    for (size_t i = 0; i < grid.size(); ++i) {
++      if (i != pos) {
++        otherTiles *= llvm::divideCeil(physShape[i], grid[i]);
++        otherGridVolume *= grid[i];
++      }
++    }
++    const int64_t extent = physShape[pos];
++    // getFactors is ascending: the first fitting split is the fewest blocks.
++    for (int64_t split : ttmlir::utils::getFactors(extent)) {
++      if (split >= grid[pos]) {
++        break;
++      }
++      const uint64_t shardBytes = otherTiles *
++                                  llvm::divideCeil(extent, split) * tileBytes *
++                                  numBuffers;
++      if (shardBytes > budgetBytes) {
++        continue;
++      }
++      if (utils::findLegalPhysicalGridForVolume(otherGridVolume * split,
++                                                targetGrid)
++              .empty()) {
++        continue;
++      }
++      grid[pos] = split;
++      break;
++    }
++  }
++}
++
+ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
+     GenericOp genericOp,
+     const EffectiveTargetGridRange &effectiveTargetGridRange) {
+@@ -461,6 +546,11 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
+     physicalShapes.push_back(physShape);
+     auto optimalGrid =
+         utils::computeOptimalGrid(operandType, physShape, targetGrid);
++    if (reductionShardBudgetBytes) {
++      clampReductionSplit(genericOp, operandIndex, operandType, physShape,
++                          targetGrid, *reductionShardBudgetBytes,
++                          /*numBuffers=*/2, optimalGrid);
++    }
+     optimalOperandGrids.push_back(optimalGrid);
+ 
+     OperandGridInfo info;
+@@ -594,6 +684,17 @@ EffectiveTargetGridRange getTargetGridRange(GenericOp genericOp,
+ GridAnalysis::GridAnalysis(Operation *moduleOp,
+                            ArrayRef<int64_t> deviceGridShape, bool ttnnMode)
+     : deviceGridShape(deviceGridShape), ttnnMode(ttnnMode) {
++  // A third of usable L1 for one operand's double-buffered reduction shard:
++  // the input stream, its scaler and the output must still all fit.
++  const char *reductionSplit = std::getenv("MOLA_TT_D2M_REDUCTION_SPLIT");
++  if (!(reductionSplit && llvm::StringRef(reductionSplit) == "stream")) {
++    if (ttcore::SystemDescAttr systemDesc =
++            ttcore::getCurrentScopeSystemDesc(moduleOp)) {
++      reductionShardBudgetBytes =
++          static_cast<uint64_t>(systemDesc.getChipDesc(0).getUsableL1Size()) /
++          3;
++    }
++  }
+   moduleOp->walk([&](GenericOp genericOp) {
+     // Skip explicit datamovement form — users manage grids manually.
+     if (genericOp.isExplicitDatamovementForm()) {
+diff --git a/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp b/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
+index 6fd7dd5697..b3d53f7c7a 100644
+--- a/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
++++ b/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
+@@ -2355,10 +2355,15 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
+   // At this stage a broadcast operand is a load whose access map carries a
+   // constant (the `0` in `affine.load %sv[%i, 0, %k, %l]`), not a tile_bcast
+   // op; the other operand is indexed by loop IVs on that dimension.
++  //
++  // A tile_bcast operand (a row or column vector replicated across the
++  // tile by unary_bcast, which is what a LayerNorm's `x * rstd` and
++  // `x * weight` are) is NOT excluded (2026-09-06): it is a full DST tile
++  // recomputed per iteration, and the FPU mul_tiles_bcast it would
++  // otherwise take is 0.088% high on bf16 (MOLA experiments/tt/probes/
++  // normbias/bcast_mul_bf16, 26% of products off by one ulp, TTNN exact),
++  // which put every bf16 LayerNorm output 0.2% high.
+   auto isBroadcast = [](mlir::Value v) {
+-    if (v.getDefiningOp<TileBcastOp>()) {
+-      return true;
+-    }
+     if (auto load = v.getDefiningOp<mlir::affine::AffineLoadOp>()) {
+       for (mlir::AffineExpr expr : load.getAffineMap().getResults()) {
+         if (mlir::isa<mlir::AffineConstantExpr>(expr)) {
+diff --git a/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp b/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
+index 3ba6a111fd..479c323453 100644
+--- a/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
++++ b/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
+@@ -46,11 +46,9 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
+       const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+       const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+       // Same broadcast test as TileMulOp::getOperandsLoadFromDstRegister:
+-      // a tile_bcast, or a load whose access carries a constant index.
++      // a load whose access carries a constant index (a tile_bcast operand
++      // is a full DST tile and takes the SFPU, see there).
+       auto isBroadcast = [](Value v) {
+-        if (v.getDefiningOp<TileBcastOp>()) {
+-          return true;
+-        }
+         if (auto load = v.getDefiningOp<affine::AffineLoadOp>()) {
+           for (AffineExpr expr : load.getAffineMap().getResults()) {
+             if (mlir::isa<AffineConstantExpr>(expr)) {
