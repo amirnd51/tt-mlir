@@ -12,7 +12,9 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
+#include <cstdint>
 #include <memory>
+#include <optional>
 
 namespace mlir::tt::d2m {
 
@@ -140,6 +142,10 @@ private:
       results;
   llvm::SmallVector<int64_t> deviceGridShape;
   bool ttnnMode;
+  // (MOLA) Double-buffered shard budget, in bytes, for an input operand along
+  // a reduction axis; nullopt streams the axis one virtual core per block as
+  // upstream does. See clampReductionSplit in GridAnalysis.cpp.
+  std::optional<uint64_t> reductionShardBudgetBytes;
 };
 
 } // namespace mlir::tt::d2m

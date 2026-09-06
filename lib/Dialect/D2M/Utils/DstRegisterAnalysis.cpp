@@ -46,11 +46,9 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
       const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
       const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
       // Same broadcast test as TileMulOp::getOperandsLoadFromDstRegister:
-      // a tile_bcast, or a load whose access carries a constant index.
+      // a load whose access carries a constant index (a tile_bcast operand
+      // is a full DST tile and takes the SFPU, see there).
       auto isBroadcast = [](Value v) {
-        if (v.getDefiningOp<TileBcastOp>()) {
-          return true;
-        }
         if (auto load = v.getDefiningOp<affine::AffineLoadOp>()) {
           for (AffineExpr expr : load.getAffineMap().getResults()) {
             if (mlir::isa<AffineConstantExpr>(expr)) {

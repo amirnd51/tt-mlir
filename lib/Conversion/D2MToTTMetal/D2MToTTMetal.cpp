@@ -176,6 +176,25 @@ public:
               unpackModes[port] = UnpackToDestMode::Fp32;
             }
           }
+          // (MOLA, 2026-09-06) A relayout kernel (tilize / untilize and
+          // nothing else) moves an f32 tensor through the FPU datacopy path,
+          // and srcA holds an f32 as Tf32: every f32 tensor D2M wrote back to
+          // the host had its low 13 mantissa bits zero, while the same value
+          // through TTNN was exact (MOLA experiments/tt/probes/normbias/
+          // f32_output_scale, 2026-09-06). TTIRToD2M brackets nearly every
+          // op with such a pair, so each f32 intermediate lost 13 bits per
+          // boundary. tilize_block and pack_untilize_block both take their
+          // datacopy through `UnpackToDestEn`, which tt-metal derives from
+          // these modes, so marking the f32 input port makes the relayout
+          // read 32-bit into DST. Only kernels with no other compute op:
+          // UnpackToDestEn is kernel-wide, and a 16-bit port in the same
+          // kernel would be unpacked to DST as well.
+          for (unsigned port : relayoutFp32SourcePorts(
+                   thread.getKernelSymbol(), cbOperandIndexToPort)) {
+            if (port < unpackModes.size()) {
+              unpackModes[port] = UnpackToDestMode::Fp32;
+            }
+          }
         }
         kernelConfig = builder.getAttr<ttmetal::ComputeConfigAttr>(
             thread.getKernelSymbol(), coreRange, kernelArgs, mathFidelity,
@@ -317,6 +336,101 @@ private:
         kernelContainsOp<ttkernel::TypecastTileOp>(*symbolTable_, kernelSymbol);
     typecastKernelCache_.try_emplace(kernelName, containsTypecast);
     return containsTypecast;
+  }
+
+  // Map every CB value in a kernel (a get_common_arg_val / get_compile_arg_val
+  // result whose ArgSpec entry is a CBPort) to its port.
+  DenseMap<Value, unsigned>
+  cbValuePorts(func::FuncOp kernelFunc,
+               const DenseMap<size_t, size_t> &cbOperandIndexToPort) const {
+    DenseMap<Value, unsigned> portOfCB;
+    auto spec = kernelFunc->getAttrOfType<ttkernel::ArgSpecAttr>(
+        ttkernel::ArgSpecAttr::name);
+    if (!spec) {
+      return portOfCB;
+    }
+    auto portOfArg = [&](ArrayRef<ttkernel::ArgAttr> args,
+                         int64_t argIndex) -> std::optional<unsigned> {
+      if (argIndex < 0 || static_cast<size_t>(argIndex) >= args.size() ||
+          args[argIndex].getArgType() != ttkernel::ArgType::CBPort) {
+        return std::nullopt;
+      }
+      auto it = cbOperandIndexToPort.find(args[argIndex].getOperandIndex());
+      if (it == cbOperandIndexToPort.end()) {
+        return std::nullopt;
+      }
+      return static_cast<unsigned>(it->second);
+    };
+    kernelFunc.walk([&](Operation *op) {
+      if (auto get = dyn_cast<ttkernel::GetCommonArgValOp>(op)) {
+        llvm::APInt index;
+        if (matchPattern(get.getArgIndex(), m_ConstantInt(&index))) {
+          if (auto port = portOfArg(spec.getRtArgs(), index.getSExtValue())) {
+            portOfCB[get.getArgVal()] = *port;
+          }
+        }
+      } else if (auto get = dyn_cast<ttkernel::GetCompileArgValOp>(op)) {
+        if (auto port = portOfArg(spec.getCtArgs(), get.getArgIndex())) {
+          portOfCB[get.getResult()] = *port;
+        }
+      }
+    });
+    return portOfCB;
+  }
+
+  // The source ports of a relayout-only kernel (tilize / untilize block ops
+  // and nothing that computes from srcA/srcB or stages through copy_tile)
+  // whose CB holds a 32-bit float, tile or row-major. Empty for any other
+  // kernel: UnpackToDestEn is kernel-wide, so a 16-bit port in the same
+  // kernel would be unpacked to DST as well.
+  SmallVector<unsigned> relayoutFp32SourcePorts(
+      SymbolRefAttr kernelSymbol,
+      const DenseMap<size_t, size_t> &cbOperandIndexToPort) const {
+    auto kernelFunc =
+        symbolTable_->lookup<func::FuncOp>(kernelSymbol.getRootReference());
+    DenseMap<Value, unsigned> portOfCB =
+        cbValuePorts(kernelFunc, cbOperandIndexToPort);
+    SmallVector<unsigned> ports;
+    bool sawRelayout = false;
+    bool sawOther = false;
+    kernelFunc.walk([&](Operation *op) {
+      if (isa<ttkernel::TilizeBlockOp, ttkernel::ExperimentalTilizeBlockOp,
+              ttkernel::UntilizeBlockOp,
+              ttkernel::ExperimentalPackUntilizeBlockOp>(op)) {
+        sawRelayout = true;
+        if (op->getNumOperands() == 0) {
+          return;
+        }
+        Value source = op->getOperand(0);
+        auto cbType = dyn_cast<ttkernel::CBType>(source.getType());
+        auto it = portOfCB.find(source);
+        if (!cbType || it == portOfCB.end()) {
+          return;
+        }
+        Type elementType = cbType.getElementType();
+        if (auto tileType = dyn_cast<ttcore::TileType>(elementType)) {
+          elementType = tileType.getElementType();
+        }
+        if (isa<FloatType>(elementType) &&
+            elementType.getIntOrFloatBitWidth() == 32 &&
+            !llvm::is_contained(ports, it->second)) {
+          ports.push_back(it->second);
+        }
+      } else if (isa<ttkernel::CopyTileOp, ttkernel::MatmulTilesOp,
+                     ttkernel::MatmulBlockOp,
+                     ttkernel::ExperimentalMatmulBlockOp,
+                     ttkernel::ReduceTileOp, ttkernel::AddTilesOp,
+                     ttkernel::SubTilesOp, ttkernel::MulTilesOp,
+                     ttkernel::BinaryDestReuseTilesOp,
+                     ttkernel::UnaryBcastTileOp, ttkernel::TransposeTileOp>(
+                     op)) {
+        sawOther = true;
+      }
+    });
+    if (!sawRelayout || sawOther) {
+      return {};
+    }
+    return ports;
   }
 
   // CB ports the kernel reads only through copy_tile (SFPU staging into

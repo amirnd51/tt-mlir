@@ -11,10 +11,15 @@
 #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
 #include "ttmlir/Dialect/TTCore/IR/Utils.h"
 #include "ttmlir/Dialect/TTIR/IR/TTIROps.h"
+#include "ttmlir/Utils.h"
 
 #include "mlir/IR/BuiltinOps.h"
 
+#include "llvm/ADT/StringRef.h"
+#include "llvm/Support/MathExtras.h"
+
 #include <algorithm>
+#include <cstdlib>
 
 namespace mlir::tt::d2m {
 
@@ -371,6 +376,86 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
   return inputInfos;
 }
 
+// (MOLA, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
+// whose double-buffered shard fits the budget, not the most.
+//
+// A reduction axis is not parallel work: splitting it into virtual cores only
+// streams the operand through L1 in more, smaller blocks, and between blocks
+// the compute kernel spills its running sum from DST to L1 and reloads it
+// through the unpacker, which holds an f32 tile as Tf32 -- 13 mantissa bits
+// truncated on every reload. Streamed one tile per block, a 768-wide f32 sum
+// came out 0.47% low on Blackhole and a sum of exact ones exact; the same
+// sum inside one block is exact (MOLA experiments/tt/probes/normbias/,
+// reduce_sum_uniform_768 / reduce_sum_ones_768). That truncation is the
+// LayerNorm-low / RMSNorm-high magnitude error of the whole model corpus.
+//
+// Only input operands and only tiled ones are touched; the split must still
+// map onto a legal physical grid. MOLA_TT_D2M_REDUCTION_SPLIT=stream restores
+// the upstream choice for an A/B.
+static void clampReductionSplit(GenericOp genericOp, unsigned operandIndex,
+                                RankedTensorType operandType,
+                                ArrayRef<int64_t> physShape,
+                                ArrayRef<int64_t> targetGrid,
+                                uint64_t budgetBytes, uint32_t numBuffers,
+                                llvm::SmallVectorImpl<int64_t> &grid) {
+  auto tileType =
+      mlir::dyn_cast<ttcore::TileType>(operandType.getElementType());
+  if (!tileType) {
+    return;
+  }
+  if (operandIndex >= genericOp.getOutputs().getBeginOperandIndex()) {
+    return;
+  }
+  SmallVector<ttcore::IteratorType> iteratorTypes =
+      genericOp.getIteratorTypesValue();
+  if (iteratorTypes.empty()) {
+    return;
+  }
+  AffineMap indexingMap = genericOp.getIndexingMapsValue()[operandIndex];
+  if (indexingMap.getNumResults() != grid.size() ||
+      physShape.size() != grid.size()) {
+    return;
+  }
+  const uint64_t tileBytes = tileType.getSizeBytes();
+  for (auto [pos, expr] : llvm::enumerate(indexingMap.getResults())) {
+    auto dimExpr = mlir::dyn_cast<AffineDimExpr>(expr);
+    if (!dimExpr || dimExpr.getPosition() >= iteratorTypes.size() ||
+        iteratorTypes[dimExpr.getPosition()] !=
+            ttcore::IteratorType::Reduction ||
+        grid[pos] <= 1) {
+      continue;
+    }
+    uint64_t otherTiles = 1;
+    int64_t otherGridVolume = 1;
+    for (size_t i = 0; i < grid.size(); ++i) {
+      if (i != pos) {
+        otherTiles *= llvm::divideCeil(physShape[i], grid[i]);
+        otherGridVolume *= grid[i];
+      }
+    }
+    const int64_t extent = physShape[pos];
+    // getFactors is ascending: the first fitting split is the fewest blocks.
+    for (int64_t split : ttmlir::utils::getFactors(extent)) {
+      if (split >= grid[pos]) {
+        break;
+      }
+      const uint64_t shardBytes = otherTiles *
+                                  llvm::divideCeil(extent, split) * tileBytes *
+                                  numBuffers;
+      if (shardBytes > budgetBytes) {
+        continue;
+      }
+      if (utils::findLegalPhysicalGridForVolume(otherGridVolume * split,
+                                                targetGrid)
+              .empty()) {
+        continue;
+      }
+      grid[pos] = split;
+      break;
+    }
+  }
+}
+
 GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
     GenericOp genericOp,
     const EffectiveTargetGridRange &effectiveTargetGridRange) {
@@ -461,6 +546,11 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
     physicalShapes.push_back(physShape);
     auto optimalGrid =
         utils::computeOptimalGrid(operandType, physShape, targetGrid);
+    if (reductionShardBudgetBytes) {
+      clampReductionSplit(genericOp, operandIndex, operandType, physShape,
+                          targetGrid, *reductionShardBudgetBytes,
+                          /*numBuffers=*/2, optimalGrid);
+    }
     optimalOperandGrids.push_back(optimalGrid);
 
     OperandGridInfo info;
@@ -594,6 +684,17 @@ EffectiveTargetGridRange getTargetGridRange(GenericOp genericOp,
 GridAnalysis::GridAnalysis(Operation *moduleOp,
                            ArrayRef<int64_t> deviceGridShape, bool ttnnMode)
     : deviceGridShape(deviceGridShape), ttnnMode(ttnnMode) {
+  // A third of usable L1 for one operand's double-buffered reduction shard:
+  // the input stream, its scaler and the output must still all fit.
+  const char *reductionSplit = std::getenv("MOLA_TT_D2M_REDUCTION_SPLIT");
+  if (!(reductionSplit && llvm::StringRef(reductionSplit) == "stream")) {
+    if (ttcore::SystemDescAttr systemDesc =
+            ttcore::getCurrentScopeSystemDesc(moduleOp)) {
+      reductionShardBudgetBytes =
+          static_cast<uint64_t>(systemDesc.getChipDesc(0).getUsableL1Size()) /
+          3;
+    }
+  }
   moduleOp->walk([&](GenericOp genericOp) {
     // Skip explicit datamovement form — users manage grids manually.
     if (genericOp.isExplicitDatamovementForm()) {

@@ -2355,10 +2355,15 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
   // At this stage a broadcast operand is a load whose access map carries a
   // constant (the `0` in `affine.load %sv[%i, 0, %k, %l]`), not a tile_bcast
   // op; the other operand is indexed by loop IVs on that dimension.
+  //
+  // A tile_bcast operand (a row or column vector replicated across the
+  // tile by unary_bcast, which is what a LayerNorm's `x * rstd` and
+  // `x * weight` are) is NOT excluded (2026-09-06): it is a full DST tile
+  // recomputed per iteration, and the FPU mul_tiles_bcast it would
+  // otherwise take is 0.088% high on bf16 (MOLA experiments/tt/probes/
+  // normbias/bcast_mul_bf16, 26% of products off by one ulp, TTNN exact),
+  // which put every bf16 LayerNorm output 0.2% high.
   auto isBroadcast = [](mlir::Value v) {
-    if (v.getDefiningOp<TileBcastOp>()) {
-      return true;
-    }
     if (auto load = v.getDefiningOp<mlir::affine::AffineLoadOp>()) {
       for (mlir::AffineExpr expr : load.getAffineMap().getResults()) {
         if (mlir::isa<mlir::AffineConstantExpr>(expr)) {
