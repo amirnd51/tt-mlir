@@ -421,6 +421,43 @@ ladder unchanged. The probes live in `experiments/tt/probes/layout` and
 `experiments/tt/probes/pythia/ladder_stats.py`. The fork's own lit suite is
 not runnable on this box.
 
+### 39 — an f32 elementwise op materialises its broadcast operand (2026-09-06)
+
+`39-ttir-to-d2m-f32-broadcast-materialised-2026-09-06.patch` —
+`lib/Conversion/TTIRToD2M/TTIRToD2M.cpp`
+
+**Why the bias sink was off.** MOLA's `mola-ttir-matmul-f32-acc` can add a
+Linear's bias to the f32 accumulator before the cast (`sink-bias`, torch's
+addmm semantics). It was off since 2026-09-05 because the D2M kernel for
+that f32 add also carried the bias broadcast as an in-kernel `tile_bcast`
+(an `unary_bcast`, an srcA op), which makes the kernel FPU-reading, and every
+f32 operand of an FPU-reading kernel comes through the 19-bit source register
+as Tf32 (`sfpuOnlyReadPorts`, -0.024% per read). Meanwhile the alternative,
+the bf16 add after the cast, is biased on its own: the packer rounds
+f32->bf16 ties away from zero where torch rounds to even, and bf16+bf16 sums
+tie often, so every Linear of Pythia-160m came out +0.05..0.09% (QKV 1.00099
+of the f32 reference, torch 1.00009; `experiments/tt/probes/pythia`,
+`py_qkv_mm` / `py_qkv` / `py_bias_add`).
+
+**The rule.** When any operand or the result of an elementwise op is f32 and
+an input is implicitly broadcast (same rank), the TTIR-to-D2M elementwise
+rewriter creates a `ttir.broadcast` for that input, so the elementwise kernel
+takes whole tiles and stays SFPU-only, reading f32 through unpack-to-dest.
+The broadcast itself still reads its input through srcA; for a bf16-valued
+bias or a row statistic that is a far smaller effect than truncating the
+accumulator. `MOLA_TT_D2M_F32_BCAST_MATERIALIZE=0` restores the fold.
+`test/Integration/d2m-f32-broadcast-materialised.mlir` pins both arms.
+
+Measured after this patch (Blackhole, first quietbox), against f32: Pythia
+QKV Linear with the bias sunk, implicit broadcast 0.99988 -> materialised
+1.00029 (torch 1.00009; without the sink 1.00099); softmax probabilities
+1.00198 -> 1.00140; layer 1.00221 -> 1.00145 with the sink; the f32
+broadcast multiply probe 0.99933 -> 0.99965; Qwen2.5-1.5B attention with the
+sink 0.99702 -> 1.00092 and its layer 1.00587 -> 1.00101. LayerNorm,
+RMSNorm, the 128-wide softmax and Qwen attention without the sink unchanged.
+With this patch MOLA turns `sink-bias` on by default. The fork's own lit
+suite is not runnable on this box.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —
