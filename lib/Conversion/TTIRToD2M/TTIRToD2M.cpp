@@ -1358,6 +1358,12 @@ private:
                                     inType.getElementType(),
                                     inType.getEncoding()),
               origInputs[j], bcastDims);
+          // The materialised tensor is produced once and read once; keep it
+          // out of L1 (ViT-base stopped fitting with it resident: required
+          // 1630208 B against 1461376 usable). resolveMolaMemSpace reads the
+          // marker on both sides: the consumer's operand layout here and,
+          // through createDpsOutputs' propagation, the producer's output.
+          bcast->setAttr("mola.memspace", rewriter.getStringAttr("dram"));
           origInputs[j] = bcast.getResult();
           changed = true;
         }
@@ -1762,6 +1768,16 @@ private:
     SmallVector<Value> origInputs = {adaptor.getInput()};
     SmallVector<Value> origOutputs =
         createDpsOutputs(loc, rewriter, {op.getResult().getType()});
+    // A `mola.memspace` marker on the broadcast describes its result; the
+    // DPS init is that result's defining value at layout time, so carry the
+    // marker over and the producer lands where the consumers expect it.
+    if (auto ms = op->getAttrOfType<mlir::StringAttr>("mola.memspace")) {
+      for (Value out : origOutputs) {
+        if (Operation *def = out.getDefiningOp()) {
+          def->setAttr("mola.memspace", ms);
+        }
+      }
+    }
 
     auto [inputs, outputs] =
         toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
