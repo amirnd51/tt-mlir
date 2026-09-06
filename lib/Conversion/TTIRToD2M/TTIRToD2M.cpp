@@ -3192,6 +3192,16 @@ public:
 
         auto preTranspose = rewriter.create<ttir::PermuteOp>(
             loc, transposedInType, input, hwTransposeIdx);
+        // This is an exact inner (H/W) transpose that D2MPermuteRewriter
+        // lowers on tiles. Without the marker, legalization folds it into a
+        // producing outer permute (ttir::PermuteOp::fold's consecutive-permute
+        // fold), which after TTIRDecomposeComplexPermute has already run
+        // yields a complex permute again -- one that moves the innermost dim
+        // -- and the row-major view that then stands in for it is not
+        // materialised correctly: Pythia's partially-rotated q (a 16|48
+        // concat of slices of a head-transposed QKV chunk) came back with
+        // QK^T cosine 0.944. MOLA local patch 38 (2026-09-06).
+        preTranspose->setAttr("decomposed", rewriter.getUnitAttr());
 
         effectiveInputs.push_back(preTranspose.getResult());
       }
@@ -3220,6 +3230,7 @@ public:
     if (transposeRowMajor) {
       auto postTranspose = rewriter.create<ttir::PermuteOp>(
           loc, outType, result, hwTransposeIdx);
+      postTranspose->setAttr("decomposed", rewriter.getUnitAttr());
       result = postTranspose->getResult(0);
     }
 
@@ -4526,6 +4537,16 @@ static LogicalResult rewriteScalarReshape(ttir::ReshapeOp op,
   return success();
 }
 
+// A permute this rewriter can express as a row-major view: the innermost
+// logical dim stays innermost. The pure inner swap belongs to
+// D2MPermuteRewriter (tile transposes); anything else that moves the
+// innermost dim is a complex permute, which TTIRDecomposeComplexPermute
+// splits before conversion and which must not be rebuilt afterwards.
+static bool isOuterPermute(ArrayRef<int64_t> permutation) {
+  const unsigned rank = permutation.size();
+  return rank >= 2 && permutation[rank - 1] == static_cast<int64_t>(rank - 1);
+}
+
 template <typename TensorManipulationOp,
           TensorManipulationInfo (*LogicalInfoFn)(TensorManipulationOp)>
 class D2MTensorManipulationOpRewriter
@@ -4552,6 +4573,19 @@ public:
       auto outputType = mlir::cast<RankedTensorType>(op.getResult().getType());
       if (isScalarUnitVolumeReshape(inputType, outputType)) {
         return rewriteScalarReshape(op, adaptor, rewriter);
+      }
+    }
+
+    if constexpr (std::is_same_v<TensorManipulationOp, ttir::PermuteOp>) {
+      // A view can only re-index whole rows: a permute that moves the
+      // innermost dim has no row-major view and is decomposed before
+      // conversion (TTIRDecomposeComplexPermute); failing here keeps a
+      // complex permute that reappears later (a fold of two simple ones)
+      // from being silently lowered to a wrong view.
+      if (!isOuterPermute(op.getPermutation())) {
+        return rewriter.notifyMatchFailure(
+            op, "complex permute (moves the innermost dim) has no row-major "
+                "view; it must be decomposed before conversion");
       }
     }
 
@@ -4765,19 +4799,29 @@ static TensorManipulationInfo permuteLogicalInfo(ttir::PermuteOp op) {
   ArrayRef<int64_t> permutation = op.getPermutation();
   unsigned logicalRank = permutation.size();
   assert(logicalRank >= 2 && "Permute must have at least 2 dimensions");
-  // Verify last dimension is not identity for outer permute handling.
-  const bool noInnerPermute =
-      !(permutation[logicalRank - 2] == static_cast<int64_t>(logicalRank - 1) &&
-        permutation[logicalRank - 1] == static_cast<int64_t>(logicalRank - 2));
-  assert(noInnerPermute && "Complex permutes (both inner and outer "
-                           "permutations) are not supported.");
+  TT_assertv(isOuterPermute(permutation),
+             "permute view rewriter needs an outer permute (innermost dim "
+             "fixed); inner and complex permutes take D2MPermuteRewriter / "
+             "TTIRDecomposeComplexPermute");
   // Check if innermost two dimensions are identity-mapped (preserved).
   bool canBeTilized =
       permutation[logicalRank - 2] == static_cast<int64_t>(logicalRank - 2) &&
       permutation[logicalRank - 1] == static_cast<int64_t>(logicalRank - 1);
+  // The view remapping maps OUTPUT logical coordinates to INPUT logical
+  // coordinates (see sliceLogicalInfo's `d * step + begin` and
+  // reshapeLogicalInfo's contract). ttir.permute follows torch: output dim i
+  // is input dim permutation[i], so the input coordinate at position
+  // permutation[i] is the output coordinate i. Building results[i] =
+  // d_{permutation[i]} instead yields the inverse permutation; the two agree
+  // exactly when the permutation is an involution (every plain transpose),
+  // which is why it went unnoticed until a fold produced a 3-cycle: the
+  // concat rewriter's H/W pre-transpose folded with a head transpose into
+  // [0, 2, 3, 1] at conversion time, and Pythia's partially-rotated q came
+  // back scrambled (QK^T cosine 0.944; a lone [1, 2, 0, 3, 4] permute reads
+  // 0.08). MOLA local patch 38 (2026-09-06).
   SmallVector<AffineExpr> results(logicalRank);
   for (auto [dstIdx, srcIdx] : llvm::enumerate(permutation)) {
-    results[dstIdx] = mlir::getAffineDimExpr(srcIdx, ctx);
+    results[srcIdx] = mlir::getAffineDimExpr(dstIdx, ctx);
   }
   AffineMap map = AffineMap::get(logicalRank, /*numSymbols=*/0, results, ctx);
   return {map, canBeTilized};
@@ -4974,6 +5018,16 @@ public:
 
       auto preTranspose = rewriter.create<ttir::PermuteOp>(
           loc, transposedInType, op.getInput(), hwTransposeIdx);
+      // Exact inner transposes for D2MPermuteRewriter's tile path. Without
+      // the marker, legalization folds them into a producing outer permute
+      // (ttir::PermuteOp::fold), the fold yields a complex permute that no
+      // pattern accepts, the legalizer rolls this rewrite back, and the slice
+      // falls through to the plain view rewriter -- a width view at a
+      // non-tile-aligned start over a DRAM operand, which reads the row
+      // start truncated to a 32-element granule: cat(q[..., 8:16], q[..., :8])
+      // for q = x[..., :64].transpose(1, 2) returned cat(q[..., :8],
+      // q[..., :8]) (cosine 0.49). MOLA local patch 38 (2026-09-06).
+      preTranspose->setAttr("decomposed", rewriter.getUnitAttr());
 
       // Transpose the slice spec.
       std::swap(begins[rank - 1], begins[rank - 2]);
@@ -4992,6 +5046,7 @@ public:
 
       auto postTranspose = rewriter.create<ttir::PermuteOp>(
           loc, outType, transposedSliceOp.getResult(), hwTransposeIdx);
+      postTranspose->setAttr("decomposed", rewriter.getUnitAttr());
 
       rewriter.replaceOp(op, postTranspose.getResult());
     } else {
@@ -5029,6 +5084,7 @@ public:
       auto preTranspose = rewriter.create<ttir::PermuteOp>(
           loc, transposedCropWidthType, cropWidthSliceOp.getResult(),
           hwTransposeIdx);
+      preTranspose->setAttr("decomposed", rewriter.getUnitAttr());
 
       // Construct the height only slice spec.
       SmallVector<int32_t> heightSliceBegins(rank, 0);
@@ -5061,6 +5117,7 @@ public:
 
       auto postTranspose = rewriter.create<ttir::PermuteOp>(
           loc, outType, heightSliceOp.getResult(), hwTransposeIdx);
+      postTranspose->setAttr("decomposed", rewriter.getUnitAttr());
 
       rewriter.replaceOp(op, postTranspose.getResult());
     }
