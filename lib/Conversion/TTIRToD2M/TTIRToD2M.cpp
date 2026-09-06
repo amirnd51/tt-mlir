@@ -1358,12 +1358,14 @@ private:
                                     inType.getElementType(),
                                     inType.getEncoding()),
               origInputs[j], bcastDims);
-          // The materialised tensor is produced once and read once; keep it
-          // out of L1 (ViT-base stopped fitting with it resident: required
-          // 1630208 B against 1461376 usable). resolveMolaMemSpace reads the
-          // marker on both sides: the consumer's operand layout here and,
-          // through createDpsOutputs' propagation, the producer's output.
-          bcast->setAttr("mola.memspace", rewriter.getStringAttr("dram"));
+          // The materialised tensor takes the default placement (L1 for
+          // MOLA's tt configuration). Pinning it to DRAM was tried and made
+          // things worse: a DRAM operand is streamed through an L1 buffer of
+          // its own, and bloom-560m, which fits with the tensor resident,
+          // stopped fitting (required 1507328 B against 1461376 usable); a
+          // model that does not fit with the exact bias epilogue falls back
+          // in MOLA's TTBackend instead. A `mola.memspace` marker set by a
+          // placement pass is still honoured by the broadcast rewriter.
           origInputs[j] = bcast.getResult();
           changed = true;
         }
