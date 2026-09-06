@@ -4,6 +4,11 @@
 
 #include "ttmlir/Dialect/D2M/Utils/DstRegisterAnalysis.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/IR/Matchers.h"
+#include <cstdlib>
+
 #include "ttmlir/Asserts.h"
 #include "ttmlir/Dialect/D2M/IR/D2MGenericRegionOps.h"
 #include "ttmlir/Dialect/D2M/IR/D2MOps.h"
@@ -35,6 +40,19 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
                "expected binary op for tile add/sub/mul");
     Type lhsType = op->getOperand(0).getType();
     Type rhsType = op->getOperand(1).getType();
+    // Float multiplies are SFPU ops (see TileMulOp::getOperandsLoadFromDstRegister
+    // for the measured FPU ELWMUL precision loss); keep this in sync with it.
+    if (mlir::isa<TileMulOp>(op)) {
+      const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+      const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+      // Broadcast operands included; see TileMulOp::getOperandsLoadFromDstRegister.
+      const bool hasBcastOperand = false;
+      if (auto tile = mlir::dyn_cast<ttcore::TileType>(lhsType);
+          sfpuMul && !hasBcastOperand && tile &&
+          mlir::isa<FloatType>(tile.getElementType())) {
+        return DstExecutionClass::SFPU;
+      }
+    }
     if (ttcore::getDataType(lhsType) == ttcore::DataType::Float32 ||
         ttcore::getDataType(rhsType) == ttcore::DataType::Float32) {
       return DstExecutionClass::SFPU;

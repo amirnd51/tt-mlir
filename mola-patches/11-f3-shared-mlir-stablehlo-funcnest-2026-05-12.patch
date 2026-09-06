@@ -1,0 +1,275 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index 3475081cf6..438f50b851 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -106,7 +106,13 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+     add_compile_definitions(TT_BUILD_DEBUG TTMLIR_ENABLE_DEBUG_LOGS)
+ endif()
+ 
+-add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR})
++add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR}
++  # MOLA local patch (2026-05-11): MOLA's bundled LLVM (sha 8f264586d752,
++  # Dec 12 2025) marks OpBuilder::create<OpTy> deprecated in favor of
++  # OpTy::create. tt-mlir source still uses the old form throughout;
++  # silence the warning so -Werror doesn't fail the build when linking
++  # against MOLA's LLVM.
++  -Wno-deprecated-declarations)
+ 
+ set(CMAKE_LINKER_TYPE DEFAULT)
+ if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+@@ -164,7 +170,14 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+ include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
+ include_directories(${TTMLIR_SOURCE_DIR}/include)
+ include_directories(${TTMLIR_BINARY_DIR}/include)
+-include_directories(${TTMLIR_TOOLCHAIN_DIR}/include)
++# MOLA local patch (2026-05-11): mark toolchain include dir as SYSTEM
++# so it's searched AFTER MLIR_INCLUDE_DIRS. When MLIR_DIR points at a
++# different LLVM install (e.g. /home/amirnass/projects/mola/build/llvm-install)
++# than the toolchain, the toolchain headers (at a different LLVM sha)
++# must NOT shadow the MLIR install's headers — otherwise we get header
++# vs lib mismatches like "no viable conversion from RegionBranchPoint
++# to RegionSuccessor" against the linked libMLIR.so's ABI.
++include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/include)
+ link_directories(${LLVM_BUILD_LIBRARY_DIR})
+ add_definitions(${LLVM_DEFINITIONS})
+ include(TTMLIRPythonSitePackages)
+@@ -172,11 +185,28 @@ include(TTMLIRPythonSitePackages)
+ add_subdirectory(third_party)
+ if (TTMLIR_ENABLE_STABLEHLO)
+   set(STABLEHLO_BUILD_EMBEDDED ON)
+-  set(STABLEHLO_ENABLE_BINDINGS_PYTHON ON)
++  # MOLA F3 (2026-05-12): MOLA's LLVM install was built without
++  # MLIR_ENABLE_BINDINGS_PYTHON, so MLIRPythonSources / MLIRPythonExtension
++  # targets don't exist. The C++ compile chain doesn't need Python
++  # bindings; force OFF to allow STABLEHLO=ON without Python deps.
++  set(STABLEHLO_ENABLE_BINDINGS_PYTHON OFF)
+   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/shardy)
+   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/shardy)
+   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/stablehlo)
+   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo)
++  # MOLA F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
++  # add_compile_options BEFORE the add_subdirectory call. Newer LLVM/MLIR
++  # TableGen emits unqualified `TokenType` references in each stablehlo
++  # *.cpp.inc verifier predicate (StablehloOps.cpp.inc, InterpreterOps.cpp.
++  # inc, …). The .inc files are included at file scope outside of
++  # `namespace mlir::stablehlo`. The toolchain stablehlo source can't be
++  # modified in-place, so we inject the `using` via -include applied to
++  # every translation unit in the stablehlo subtree. The injected header
++  # only defines `using mlir::stablehlo::TokenType;` so it's benign for
++  # files that don't reference TokenType — repeat `using` declarations
++  # in the same scope are valid.
++  add_compile_options(
++    "-include${CMAKE_CURRENT_SOURCE_DIR}/../stablehlo_using_token.h")
+   add_subdirectory(${TTMLIR_TOOLCHAIN_DIR}/src/shardy ${CMAKE_CURRENT_BINARY_DIR}/shardy EXCLUDE_FROM_ALL)
+   add_subdirectory(${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo ${CMAKE_CURRENT_BINARY_DIR}/stablehlo EXCLUDE_FROM_ALL)
+   install(DIRECTORY shardy ${CMAKE_CURRENT_BINARY_DIR}/shardy/shardy
+diff --git a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+index e8a6b7888b..06263ac3e9 100644
+--- a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
++++ b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+@@ -146,6 +146,18 @@ struct D2MPipelineOptions : public PassPipelineOptions<D2MPipelineOptions> {
+           "Force all non-bound allocator variables to spill into DRAM."),
+       llvm::cl::init(false)};
+ 
++  // MOLA local hook (2026-05-12): a pass-pipeline string parsed and run
++  // right after ttir-to-d2m (where tensors carry per-tensor
++  // MetalLayoutAttr memory_space) and before grid-selection. Lets an
++  // out-of-tree policy layer (MOLA) annotate per-tensor L1/DRAM placement
++  // that D2MAllocate then honors. Empty = no-op; the named pass must be
++  // in the global pass registry at runtime.
++  Option<std::string> molaPlacementPipeline{
++      *this, "mola-placement-pipeline",
++      llvm::cl::desc("Pass-pipeline run after ttir-to-d2m for MOLA "
++                     "per-tensor placement annotation (empty = off)."),
++      llvm::cl::init("")};
++
+   // The allocator will not consider generic outputs eligible for spilling
+   // unless this option is turned on.
+   Option<bool> allowL1OutputSpilling{
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index 4713cc4ddf..35122d8fb2 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -20,17 +20,61 @@ get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
+ get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
+ get_property(translation_libs GLOBAL PROPERTY MLIR_TRANSLATION_LIBS)
+ 
+-set(TTMLIR_LIBS
+-  ${dialect_libs}
+-  ${conversion_libs}
+-  ${extension_libs}
+-  ${translation_libs}
+-  TTMLIRSupport
+-  MLIRPass
+-  MLIRSupport
+-  MLIRRegisterAllPasses
+-  MLIRLinalgSynchronizableOpInterfaceImpl
+-)
++# MOLA local patch (2026-05-11): split MLIR libs from tt-mlir's own
++# libs. When MLIR_LINK_MLIR_DYLIB=ON, MLIR libs link via libMLIR.so
++# (single shared MLIR in the process). Only tt-mlir's own static libs
++# get --whole-archive'd into libTTMLIRCompiler.so. Without this split,
++# both libTTMLIRCompiler.so AND the consuming binary embed MLIR's
++# static initializers (pass-pipeline registry, cl::opt enum-values for
++# pass options like SparseTensor's LoopOrderingStrategy::kDefault) and
++# they collide at startup with "Option 'default' already exists!".
++if(MLIR_LINK_MLIR_DYLIB)
++  # Partition libs into:
++  #   TTMLIR_OWN_LIBS  - tt-mlir's own (names starting with TTMLIR* or
++  #                       MLIRTT*). --whole-archive'd into the .so so the
++  #                       pass-registration static globals are linked in.
++  #   TTMLIR_MLIR_LIBS - MLIR's libs (everything else). Linked normally
++  #                       so MLIR_LINK_MLIR_DYLIB routes through libMLIR.so.
++  set(_all_libs
++    ${dialect_libs}
++    ${conversion_libs}
++    ${extension_libs}
++    ${translation_libs}
++    TTMLIRSupport
++    MLIRPass
++    MLIRSupport
++    MLIRRegisterAllPasses
++    MLIRLinalgSynchronizableOpInterfaceImpl)
++  set(TTMLIR_OWN_LIBS)
++  set(TTMLIR_MLIR_LIBS)
++  foreach(_lib ${_all_libs})
++    # MLIR's install libs start with MLIR* (and not MLIRTT*). All other
++    # patterns are tt-mlir-bundled libs that must --whole-archive into
++    # the .so so their pass-pipeline registrations link in.
++    if (_lib MATCHES "^MLIR" AND NOT _lib MATCHES "^MLIRTT")
++      list(APPEND TTMLIR_MLIR_LIBS ${_lib})
++    else()
++      list(APPEND TTMLIR_OWN_LIBS ${_lib})
++    endif()
++  endforeach()
++  # Also ensure libMLIR.so is in the .so's link line so transitive
++  # MLIR refs resolve via the shared lib at runtime.
++  list(APPEND TTMLIR_MLIR_LIBS MLIR)
++  set(TTMLIR_LIBS ${TTMLIR_OWN_LIBS})
++else()
++  set(TTMLIR_LIBS
++    ${dialect_libs}
++    ${conversion_libs}
++    ${extension_libs}
++    ${translation_libs}
++    TTMLIRSupport
++    MLIRPass
++    MLIRSupport
++    MLIRRegisterAllPasses
++    MLIRLinalgSynchronizableOpInterfaceImpl
++  )
++  set(TTMLIR_MLIR_LIBS)
++endif()
+ 
+ set(SHARDY_LIBS)
+ if (TTMLIR_ENABLE_STABLEHLO)
+@@ -108,7 +152,22 @@ else()
+ endif()
+ 
+ target_link_libraries(TTMLIRCompiler PRIVATE
++    # MOLA F3 path C (2026-05-11): force libMLIR.so + libLLVM.so to be
++    # processed BEFORE any MLIR/LLVM static archive in the link line.
++    # Otherwise the linker walks .a files first; their TUs (e.g.
++    # LLVMCodeGen's "enable-branch-hint" cl::opt, MLIR SparseTensor's
++    # "default" cl::opt) get pulled in to satisfy undef refs, and the
++    # static-init constructors fire alongside the .so's already-
++    # registered counterparts at process startup → "Option already
++    # exists!". Using `--no-as-needed` ensures the linker actually
++    # walks the .so's exported symbols rather than dropping them as
++    # unreferenced.
++    "-Wl,--no-as-needed"
++    "${LLVM_LIBRARY_DIR}/libMLIR.so.22.0git"
++    "${LLVM_LIBRARY_DIR}/libLLVM.so.22.0git"
++    "-Wl,--as-needed"
+     ${REEXPORT_TTMLIR_LIBS}
++    ${TTMLIR_MLIR_LIBS}
+     flatbuffers
+ )
+ 
+diff --git a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+index bdc3799f74..7c3c3a87fa 100644
+--- a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
++++ b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+@@ -20,6 +20,7 @@
+ #include "mlir/Dialect/Linalg/Passes.h"
+ #include "mlir/Dialect/MemRef/Transforms/Passes.h"
+ #include "mlir/Pass/PassManager.h"
++#include "mlir/Pass/PassRegistry.h"
+ #include "mlir/Transforms/Passes.h"
+ 
+ namespace mlir::tt::ttmetal {
+@@ -111,6 +112,19 @@ void createD2MFrontendPipeline(OpPassManager &pm,
+     toD2MOptions.enableMulticastInference = options.enableMulticastInference;
+   }
+   pm.addPass(tt::createTTIRToD2MPass(toD2MOptions));
++  // MOLA local hook (2026-05-12): run an out-of-tree per-tensor placement
++  // policy right after ttir-to-d2m (tensors now carry MetalLayoutAttr
++  // memory_space) and before grid-selection / allocate. The named pass
++  // resolves from the global pass registry at runtime (registered by the
++  // MOLA driver). No-op when the option is empty.
++  if (!options.molaPlacementPipeline.empty()) {
++    if (mlir::failed(mlir::parsePassPipeline(options.molaPlacementPipeline, pm,
++                                             llvm::errs()))) {
++      llvm::errs() << "createD2MFrontendPipeline: failed to parse "
++                      "mola-placement-pipeline='"
++                   << options.molaPlacementPipeline << "'\n";
++    }
++  }
+   pm.addPass(d2m::createD2MScalarizeConstTensors());
+   d2m::D2MGridSelectionOptions gridOptOptions;
+   {
+diff --git a/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp b/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
+index ddffa45fd1..dac5ae4b01 100644
+--- a/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
++++ b/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
+@@ -959,14 +959,25 @@ llvm::SmallVector<int64_t>
+ MetalLayoutAttr::getDeviceShape(ArrayRef<int64_t> gridShape,
+                                 ArrayRef<int64_t> tileShape) const {
+   llvm::SmallVector<int64_t> physicalShape = getPhysicalShape(tileShape);
+-  llvm::SmallVector<int64_t> deviceShape(gridShape);
++  // MOLA local patch (2026-05-05, patch 10): pad gridShape with 1s
++  // to match physicalShape's rank. Higher-rank tensors (e.g. Llama's
++  // 4D-6D activations after tile expansion) iterate physicalShape
++  // beyond the device's mesh-grid rank (typically 2D); without
++  // padding, gridShape[i] is OOB. Padding with 1 corresponds to
++  // "no grid distribution on this dim" which is the correct
++  // semantic for non-mesh dims.
++  llvm::SmallVector<int64_t> paddedGrid(gridShape.begin(), gridShape.end());
++  while (paddedGrid.size() < physicalShape.size()) {
++    paddedGrid.insert(paddedGrid.begin(), 1);
++  }
++  llvm::SmallVector<int64_t> deviceShape(paddedGrid);
+   deviceShape.reserve(physicalShape.size() * 2);
+ 
+   // Divide grid dimensions in physical shape by tile dimensions to obtain the
+   // shard shape and append it to the device shape.
+   for (size_t i = 0; i < physicalShape.size(); ++i) {
+     const int64_t dim = physicalShape[i];
+-    const int64_t gridDim = gridShape[i];
++    const int64_t gridDim = paddedGrid[i];
+     TT_assertv(dim % gridDim == 0,
+                "Collapsed dimension must be evenly divisible by grid "
+                "dimension, got {} % {} != 0.",
+diff --git a/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp b/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
+index 4017248eee..0936910b2f 100644
+--- a/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
++++ b/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
+@@ -68,12 +68,16 @@ void createStableHLOToTTIRPipeline(
+   }
+   pm.addPass(mlir::createInlinerPass());
+   if (options.enableAggressiveSimplification) {
+-    pm.addPass(
++    // MOLA F3 (2026-05-12): post-bump these stablehlo simplifier passes
++    // are restricted to `func.func`. Nest them under func.func so the
++    // pass-manager accepts them when the parent pm is module-scoped.
++    pm.nest<mlir::func::FuncOp>().addPass(
+         ::mlir::stablehlo::createStablehloAggressiveSimplificationPass());
+   }
+   // Expand complex math ops (e.g. mul, sqrt, log) into real arithmetic before
+   // converting complex types to float-pair representation.
+-  pm.addPass(::mlir::stablehlo::createStablehloComplexMathExpanderPass());
++  pm.nest<mlir::func::FuncOp>().addPass(
++      ::mlir::stablehlo::createStablehloComplexMathExpanderPass());
+   // Convert complex types to float-pair representation before lowering.
+   pm.addPass(
+       mlir::tt::stablehlo::createStableHLOComplexDataTypeConversionPass());

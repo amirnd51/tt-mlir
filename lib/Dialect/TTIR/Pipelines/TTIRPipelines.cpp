@@ -63,7 +63,10 @@ void createStableHLOToTTIRPipeline(
     pm.addPass(createConvertArithToStableHLOPass());
   }
   if (options.enableAggressiveSimplification) {
-    pm.addPass(
+    // MOLA F3 (2026-05-12, re-ported 2026-08-24): this stablehlo pass is
+    // anchored on `func.func`. Upstream adds it straight to a module-scoped pm,
+    // which aborts under parsePassPipeline (it forces Nesting::Explicit).
+    pm.nest<mlir::func::FuncOp>().addPass(
         ::mlir::stablehlo::createStablehloAggressiveSimplificationPass());
   }
   // Lower complex types to the float-pair representation while still in
@@ -72,7 +75,9 @@ void createStableHLOToTTIRPipeline(
   // legalized to TTIR ops (ttir.mesh_partition) that the StableHLO-only complex
   // conversion can no longer reach (tt-xla #5313). Runs after aggressive
   // simplification so real/imag-of-complex folds still happen on complex ops.
-  pm.addPass(::mlir::stablehlo::createStablehloComplexMathExpanderPass());
+  // Also func.func-anchored -- same reason as above.
+  pm.nest<mlir::func::FuncOp>().addPass(
+      ::mlir::stablehlo::createStablehloComplexMathExpanderPass());
   pm.addPass(
       mlir::tt::stablehlo::createStableHLOComplexDataTypeConversionPass());
 

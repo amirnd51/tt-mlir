@@ -4,6 +4,10 @@
 
 #include "ttmlir/Dialect/D2M/IR/D2MGenericRegionOps.h"
 
+#include "mlir/Dialect/Affine/IR/AffineOps.h"
+#include "mlir/IR/Matchers.h"
+#include <cstdlib>
+
 #include "ttmlir/Dialect/TTCore/IR/TTCoreOpsTypes.h"
 #include "ttmlir/Dialect/TTCore/IR/Utils.h"
 #include "ttmlir/Utils.h"
@@ -2327,6 +2331,39 @@ SmallVector<int64_t> TileSubOp::getOperandsLoadFromDstRegister() {
 }
 
 SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
+  // Float multiplies run on the SFPU (both operands staged in DST), not the
+  // FPU's ELWMUL: on Blackhole the FPU bf16 x bf16 product differs from the
+  // round-to-nearest-even result on ~28% of elements (relative error up to
+  // 1e-2, measured 2026-09-05 on random operands, MOLA
+  // experiments/tt/probes/qwen/bf16_mul.py) even with HiFi4 configured,
+  // while the SFPU mul_binary_tile is exact -- which is also what TTNN's
+  // binary_ng uses for bf16 multiply. Add/sub stay on the FPU: their FPU
+  // results match TTNN's exactly. Must agree with classifyComputeOp in
+  // Utils/DstRegisterAnalysis.cpp (DST capacity is sized by the same class).
+  // MOLA_TT_D2M_SFPU_MUL=0 restores the FPU multiply for an A/B; the
+  // classifier in DstRegisterAnalysis.cpp reads the same switch.
+  const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+  const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+  // Broadcast operands included (2026-09-06). Patch 34 kept a multiply with
+  // a broadcast operand on the FPU because the SFPU path computed
+  // TinyLlama's RoPE (q[1,32,128,64] * cos[1,1,128,64]) at cosine 0.318.
+  // The cause was the dst slice pitch in InsertDstRegisterAccess: an
+  // operand whose access map carries a constant index owns fewer dst dims
+  // than its neighbour, and its slice base was computed from its own dims,
+  // landing inside the other operand's slots. buildIndices now takes the
+  // pitch from the whole compute nest, and that probe is bit-identical to
+  // TTNN on the SFPU. The FPU broadcast product is 0.088% high on bf16
+  // (MOLA experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
+  // float stays there.
+  auto lhsType = getOperand(0).getType();
+  if (sfpuMul && mlir::isa<mlir::tt::ttcore::TileType>(lhsType) &&
+      mlir::isa<mlir::FloatType>(
+          mlir::cast<mlir::tt::ttcore::TileType>(lhsType).getElementType())) {
+    if (mlir::isa<mlir::tt::ttcore::TileType>(getOperand(1).getType())) {
+      return {0, 1};
+    }
+    return {0};
+  }
   return getOperandsLoadFromDstRegisterFPUOrSFPUBinary(getOperation());
 }
 

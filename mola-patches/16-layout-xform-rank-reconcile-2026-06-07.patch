@@ -1,0 +1,78 @@
+diff --git a/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp b/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
+index d29bd501e8..b04e7e5fe9 100644
+--- a/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
++++ b/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
+@@ -305,8 +305,36 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
+ 
+   // Build OUTPUT device → logical map.
+   // OUTPUT device → OUTPUT physical.
++  // MOLA local patch (2026-06-07): pad a short grid (leading unit dims) and
++  // prepend an expansion so the composed map's input dims match the
++  // tensor's TRUE device rank (see the input-side patch below).
++  size_t toPad = toPhysicalShape.size() > toGridShape.size()
++                     ? toPhysicalShape.size() - toGridShape.size()
++                     : 0;
++  SmallVector<int64_t> toGridPadded(toPad, 1);
++  toGridPadded.append(toGridShape.begin(), toGridShape.end());
+   auto toDeviceToToPhysical = ttmlir::utils::buildDeviceToPhysicalMap(
+-      toPhysicalShape, toGridShape, context);
++      toPhysicalShape, toGridPadded, context);
++  if (toPad) {
++    // True device rank = 2 * gridRank (grid coords + same-rank shard
++    // coords). Expand to the padded 2*physRank coords by inserting
++    // constant-0 in each padded slot of both halves.
++    size_t rank = toPhysicalShape.size();
++    size_t g = toGridShape.size();
++    SmallVector<mlir::AffineExpr> exp;
++    exp.reserve(2 * rank);
++    auto zero = mlir::getAffineConstantExpr(0, context);
++    for (size_t i = 0; i < toPad; ++i)
++      exp.push_back(zero);
++    for (size_t i = 0; i < g; ++i)
++      exp.push_back(mlir::getAffineDimExpr(i, context));
++    for (size_t i = 0; i < toPad; ++i)
++      exp.push_back(zero);
++    for (size_t i = 0; i < g; ++i)
++      exp.push_back(mlir::getAffineDimExpr(g + i, context));
++    auto expand = mlir::AffineMap::get(2 * g, 0, exp, context);
++    toDeviceToToPhysical = toDeviceToToPhysical.compose(expand);
++  }
+ 
+   // OUTPUT physical → logical (inverse of collapse).
+   auto toAlignments = toLayout.getDimAlignments();
+@@ -325,8 +353,34 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
+       fromLayout.getCollapsedIntervals(), context);
+ 
+   // INPUT physical → INPUT device.
++  //
++  // MOLA local patch (2026-06-07): a tensor whose grid rank is lower than
++  // its physical rank (leading size-1 dims dropped from the grid, e.g.
++  // Llama's batched attention tensors materialized with a 2D grid against a
++  // 3D physical shape) used to assert in buildPhysicalToDeviceMap. Build
++  // the map on a leading-1 padded grid, then project the padded grid and
++  // shard coordinates (constant 0) back out so the map's results match the
++  // tensor's TRUE device rank.
++  size_t fromPad = fromPhysicalShape.size() > fromGridShape.size()
++                       ? fromPhysicalShape.size() - fromGridShape.size()
++                       : 0;
++  SmallVector<int64_t> fromGridPadded(fromPad, 1);
++  fromGridPadded.append(fromGridShape.begin(), fromGridShape.end());
+   auto fromPhysicalToFromDevice = ttmlir::utils::buildPhysicalToDeviceMap(
+-      fromPhysicalShape, fromGridShape, context);
++      fromPhysicalShape, fromGridPadded, context);
++  if (fromPad) {
++    // Drop result dims [0, fromPad) (padded grid coords) and
++    // [rank, rank + fromPad) (padded shard coords); all are constant 0.
++    size_t rank = fromPhysicalShape.size();
++    SmallVector<mlir::AffineExpr> keep;
++    keep.reserve(2 * (rank - fromPad));
++    for (size_t i = fromPad; i < rank; ++i)
++      keep.push_back(fromPhysicalToFromDevice.getResult(i));
++    for (size_t i = rank + fromPad; i < 2 * rank; ++i)
++      keep.push_back(fromPhysicalToFromDevice.getResult(i));
++    fromPhysicalToFromDevice = mlir::AffineMap::get(
++        fromPhysicalToFromDevice.getNumDims(), 0, keep, context);
++  }
+ 
+   // Compose: logical → INPUT physical → INPUT device.
+   auto logicalToFromDevice =

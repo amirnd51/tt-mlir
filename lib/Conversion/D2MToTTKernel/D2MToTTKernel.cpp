@@ -1520,9 +1520,15 @@ public:
           auto scalarParam = scalarToI32Bits(rewriter, loc, adaptor.getRhs());
           rewriter.create<ttkernel::DivUnaryTileOp>(loc, dstIdx, scalarParam);
         } else if constexpr (std::is_same_v<ConcreteOp, d2m::TilePowOp>) {
-          // For power, convert float value to integer (not bitcast)
-          auto scalarParam = rewriter.create<arith::FPToSIOp>(
-              loc, rewriter.getI32Type(), adaptor.getRhs());
+          // power_tile takes the exponent as IEEE-754 float BITS, not as an
+          // integral value: the SFPU kernel does Converter::as_float(param)
+          // before using it (calculate_unary_power in
+          // ckernel_sfpu_unary_power.h). Converting 3.0 to the integer 3 made
+          // the kernel evaluate x ** as_float(3), i.e. x ** 4.2e-45, which is
+          // ~1 for every element -- silently wrong data, not a crash. It also
+          // truncated any fractional exponent to 0. Encode the scalar the same
+          // way every other scalar binop above does.
+          auto scalarParam = scalarToI32Bits(rewriter, loc, adaptor.getRhs());
           rewriter.create<ttkernel::PowUnaryTileOp>(loc, dstIdx, scalarParam);
         }
         // Scalar ops operate in-place on DST slot - replace with the same

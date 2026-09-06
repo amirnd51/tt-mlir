@@ -98,6 +98,20 @@ static void recordGenericConsumer(Operation *user,
     useGeneric = user->getParentOfType<d2m::GenericOp>();
   }
 
+  if (!useGeneric) {
+    // (MOLA diagnostic) name the op that violates the invariant -- the bare
+    // assertion says only that one exists, which is not enough to fix it.
+    llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
+                 << user->getName().getStringRef() << "'\n  consumer : " << *user
+                 << "\n  consumer loc: " << user->getLoc() << "\n";
+    if (user->getNumOperands() > 0) {
+      Value in = user->getOperand(0);
+      llvm::errs() << "  its operand type: " << in.getType() << "\n";
+      if (Operation *def = in.getDefiningOp())
+        llvm::errs() << "  produced by: '" << def->getName().getStringRef()
+                     << "' at " << def->getLoc() << "\n";
+    }
+  }
   TT_assertv(useGeneric,
              "ToLayout result must be used by a single GenericOp, a single "
              "ViewLayout, or a single MaskOp feeding a single GenericOp");
@@ -178,6 +192,7 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
   }
 
   auto outputType = mlir::cast<mlir::RankedTensorType>(toLayoutOp.getType(0));
+
   auto oldLayout =
       mlir::dyn_cast<ttcore::MetalLayoutAttr>(outputType.getEncoding());
   if (!oldLayout) {
@@ -204,6 +219,31 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
       getScalarBridgePaddingTileShape(toLayoutOp, outputType);
   RankedTensorType newTensorType = utils::tensorWithOptimalGrid(
       outputType, ttnnMode, optimalGrid, paddingTileShape);
+
+  // (MOLA) Decline a grid this tensor cannot be reblocked back from.
+  //
+  // Below, the optimal-grid tensor is reblocked to the ORIGINAL grid to keep the
+  // view chain well formed. reblockShapedType asserts that each new grid
+  // dimension divides the old tile count exactly -- a ShapedType has one shard
+  // shape for all cores and cannot express an uneven split -- and that assert
+  // ABORTS the compiler rather than reporting a diagnostic a caller could
+  // recover from.
+  //
+  // The precondition was believed unreachable because selection picks divisors
+  // (see chooseGridForShape's largest-divisor search). It is reachable: the
+  // divisor is chosen against one shape, and by the time we get here the shape
+  // has been through interval collapse and alignment, so it need not still
+  // divide. Observed on SmolLM-135M at sequence 320 and above with no user
+  // override at all.
+  //
+  // Declining is the conservative choice. The op keeps its current grid, which
+  // is trivially reblockable because it is already there. A less parallel grid
+  // costs performance; an abort costs the compile.
+  if (!utils::canReblockShapedType(newTensorType,
+                                   oldLayout.getGridShape(outputType))) {
+    return;
+  }
+
   builder.setInsertionPoint(emptyOp);
 
   // VGM is NOT propagated from the to_layout's input here — the output EmptyOp
@@ -288,9 +328,19 @@ static void insertViewForTTNNDRAMTensor(Value operand,
   AffineMap reblockMap = ttmlir::utils::calculateReblockMap(
       unShardedShapeWithGrid, fakeShardedShape, builder.getContext());
 
+  // MOLA local patch (2026-06-07): Interleaved is only correct for the
+  // single-core (1x1) distribution. For a multicore optimalGrid the view
+  // output must be Sharded so address derivation goes through the
+  // ShardLayout/coreVirtMap path (proven exact for arg-fed DRAM-sharded at
+  // 2x2/5x5/8x8); the hardcoded Interleaved tag fed consumers garbage on
+  // multicore grids (constant-fed matmuls divergent at >=2x2).
+  ttcore::TensorMemoryLayout viewMemLayout =
+      (ttmlir::utils::volume<int64_t>(llvm::ArrayRef(optimalGrid)) > 1)
+          ? ttcore::TensorMemoryLayout::Sharded
+          : ttcore::TensorMemoryLayout::Interleaved;
   auto viewOutputLayout = ttcore::MetalLayoutAttr::get(
       builder.getContext(), baseMetalLayout.getLogicalShape(),
-      ttcore::MemorySpace::DeviceDRAM, ttcore::TensorMemoryLayout::Interleaved,
+      ttcore::MemorySpace::DeviceDRAM, viewMemLayout,
       baseMetalLayout.getCollapsedIntervals(),
       baseMetalLayout.getDimAlignments());
 
@@ -315,6 +365,13 @@ optimizeTTNNMetalLayoutCastOpGrid(ttir::TTNNMetalLayoutCastOp castOp,
 
   if (optimalGrid == outputLayout.getGridShape(outputType)) {
     // Already at target grid shape.
+    return;
+  }
+
+  // (MOLA) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
+  // an inexact split and that assert aborts the compiler. Decline rather than
+  // die; the op keeps the grid it already has.
+  if (!utils::canReblockShapedType(outputType, optimalGrid)) {
     return;
   }
 
@@ -966,6 +1023,56 @@ public:
     if (failed(planTopKPlacements(module))) {
       signalPassFailure();
       return;
+      }
+
+    // MOLA local patch (2026-06-07): cross-generic producer/consumer grid
+    // harmonization. Each generic's grids are anchored on its own output,
+    // so a single-use staging producer (constant fill, get_global tilize)
+    // can land on a different grid than its consumer's operand — the same
+    // DRAM buffer then gets written shard-order A and read shard-order B,
+    // silently degrading the consumer to an input passthrough (one-hot
+    // probes show out==in verbatim). Re-anchor such producers: when a
+    // generic's input operand is produced by a single-use generic whose
+    // output grid differs, rebuild the producer with the consumer's grid.
+    SmallVector<d2m::GenericOp> consumers;
+    module.walk(
+        [&](d2m::GenericOp genericOp) { consumers.push_back(genericOp); });
+    OpBuilder builder(module.getContext());
+    for (auto consumer : consumers) {
+      for (Value operand : consumer.getInputs()) {
+        auto producer = operand.getDefiningOp<d2m::GenericOp>();
+        if (!producer || !operand.hasOneUse())
+          continue;
+        auto opType = mlir::cast<RankedTensorType>(operand.getType());
+        auto layout =
+            mlir::dyn_cast<ttcore::MetalLayoutAttr>(opType.getEncoding());
+        if (!layout)
+          continue;
+        ArrayRef<int64_t> prodGrid = layout.getGridShape(opType);
+        ArrayRef<int64_t> consGrid = consumer.getGrid().getShape();
+        if (prodGrid.size() != consGrid.size() ||
+            llvm::equal(prodGrid, consGrid))
+          continue;
+        // Verify the consumer grid divides the producer output tiles.
+        SmallVector<int64_t> tiles(prodGrid.size());
+        ArrayRef<int64_t> shard = layout.getShardShape(opType);
+        bool divides = true;
+        for (size_t i = 0; i < tiles.size(); ++i) {
+          tiles[i] = prodGrid[i] * shard[i];
+          divides &= (consGrid[i] != 0) && (tiles[i] % consGrid[i] == 0);
+        }
+        if (!divides)
+          continue;
+        ttcore::GridAttr newGrid =
+            ttcore::GridAttr::get(module.getContext(), consGrid);
+        builder.setInsertionPoint(producer);
+        auto ret = producer.withParallelization(builder, newGrid, std::nullopt,
+                                                /*generateReturnView=*/false);
+        if (failed(ret))
+          continue;
+        producer->replaceAllUsesWith(ret->genericOp);
+        producer.erase();
+      }
     }
   }
 

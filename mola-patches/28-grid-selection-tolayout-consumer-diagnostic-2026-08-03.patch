@@ -1,0 +1,25 @@
+diff --git a/lib/Dialect/D2M/Transforms/GridSelection.cpp b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+index 60516b4cc3..56c34030d4 100644
+--- a/lib/Dialect/D2M/Transforms/GridSelection.cpp
++++ b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+@@ -93,6 +93,20 @@ static void recordGenericConsumer(Operation *user,
+     useGeneric = user->getParentOfType<d2m::GenericOp>();
+   }
+ 
++  if (!useGeneric) {
++    // (MOLA diagnostic) name the op that violates the invariant -- the bare
++    // assertion says only that one exists, which is not enough to fix it.
++    llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
++                 << user->getName().getStringRef() << "'\n  consumer : " << *user
++                 << "\n  consumer loc: " << user->getLoc() << "\n";
++    if (user->getNumOperands() > 0) {
++      Value in = user->getOperand(0);
++      llvm::errs() << "  its operand type: " << in.getType() << "\n";
++      if (Operation *def = in.getDefiningOp())
++        llvm::errs() << "  produced by: '" << def->getName().getStringRef()
++                     << "' at " << def->getLoc() << "\n";
++    }
++  }
+   TT_assertv(useGeneric,
+              "ToLayout result must be used by a single GenericOp, a single "
+              "ViewLayout, or a single MaskOp feeding a single GenericOp");

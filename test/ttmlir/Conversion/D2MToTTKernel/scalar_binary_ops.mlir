@@ -143,12 +143,19 @@ func.func @test_div_scalar_bf16(%in: !ttype_bf16) -> (!ttype_bf16) {
 // -----
 
 // Scalar pow: f32 uses power_tile_init + pow_unary_tile.
+//
+// The exponent must reach power_tile as IEEE-754 float BITS -- the SFPU does
+// Converter::as_float(param). An arith.fptosi here would hand the kernel the
+// integral 2, i.e. x ** 4.2e-45 (~1 everywhere): silently wrong data, which is
+// why these checks pin the ENCODING and not just the call.
 
 !ttype_f32 = tensor<32x32xf32>
 // CHECK-LABEL: func.func @test_pow_scalar_f32
 func.func @test_pow_scalar_f32(%in: !ttype_f32) -> (!ttype_f32) {
+  // CHECK-NOT: arith.fptosi
+  // CHECK: %[[EXP:.*]] = arith.constant 1073741824 : i32
   // CHECK: ttkernel.power_tile_init
-  // CHECK: ttkernel.power_tile(
+  // CHECK: ttkernel.power_tile(%{{.*}}, %[[EXP]])
   %cst = "ttir.constant"() {value = dense<2.000000e+00> : tensor<32x32xf32>} : () -> !ttype_f32
   %0 = "ttir.pow"(%in, %cst) : (!ttype_f32, !ttype_f32) -> !ttype_f32
   return %0 : !ttype_f32
@@ -156,14 +163,34 @@ func.func @test_pow_scalar_f32(%in: !ttype_f32) -> (!ttype_f32) {
 
 // -----
 
-// Scalar pow: bf16 uses power_tile_init + pow_unary_tile.
+// Scalar pow: bf16 uses power_tile_init + pow_unary_tile, with the exponent
+// widened to f32 before the bit reinterpretation (2.0bf16 -> 0x40000000).
 
 !ttype_bf16 = tensor<32x32xbf16>
 // CHECK-LABEL: func.func @test_pow_scalar_bf16
 func.func @test_pow_scalar_bf16(%in: !ttype_bf16) -> (!ttype_bf16) {
+  // CHECK-NOT: arith.fptosi
+  // CHECK: %[[EXP:.*]] = arith.constant 1073741824 : i32
   // CHECK: ttkernel.power_tile_init
-  // CHECK: ttkernel.power_tile(
+  // CHECK: ttkernel.power_tile(%{{.*}}, %[[EXP]])
   %cst = "ttir.constant"() {value = dense<2.000000e+00> : tensor<32x32xbf16>} : () -> !ttype_bf16
   %0 = "ttir.pow"(%in, %cst) : (!ttype_bf16, !ttype_bf16) -> !ttype_bf16
   return %0 : !ttype_bf16
+}
+
+// -----
+
+// Scalar pow with a FRACTIONAL exponent. This is the case the integral
+// conversion truncated to 0 (x ** 0 == 1) rather than merely mis-scaling, so it
+// gets its own check: 1.5f is 0x3fc00000.
+
+!ttype_f32 = tensor<32x32xf32>
+// CHECK-LABEL: func.func @test_pow_scalar_fractional
+func.func @test_pow_scalar_fractional(%in: !ttype_f32) -> (!ttype_f32) {
+  // CHECK-NOT: arith.fptosi
+  // CHECK: %[[EXP:.*]] = arith.constant 1069547520 : i32
+  // CHECK: ttkernel.power_tile(%{{.*}}, %[[EXP]])
+  %cst = "ttir.constant"() {value = dense<1.500000e+00> : tensor<32x32xf32>} : () -> !ttype_f32
+  %0 = "ttir.pow"(%in, %cst) : (!ttype_f32, !ttype_f32) -> !ttype_f32
+  return %0 : !ttype_f32
 }

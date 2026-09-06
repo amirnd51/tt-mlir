@@ -18,6 +18,8 @@
 #include "ttmlir/Dialect/TTNN/IR/TTNNOpsAttrs.h"
 #include "ttmlir/Utils.h"
 
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/Tensor/IR/Tensor.h"
 #include "mlir/Dialect/Utils/StructuredOpsUtils.h"
@@ -36,9 +38,11 @@
 #include "mlir/Support/LLVM.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
+#include "llvm/ADT/MapVector.h"
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Support/LogicalResult.h"
+#include <cstdlib>
 
 #include <array>
 #include <cstddef>
@@ -50,6 +54,30 @@
 namespace mlir::tt {
 
 namespace {
+
+/// MOLA: does `v` root at a constant/weight (peeling reshape/broadcast/typecast/
+/// permute/view ops)? Constants must NOT be L1-pinned by opt #1/#2 — mis-placing
+/// a constant fill on the D2M path silently degenerates the consumer to a
+/// passthrough (see the constant-memspace handling in createOptimalLayoutOp), so
+/// pinning a bias/scale/mask constant feeding an elementwise op would miscompile.
+static bool molaRootsAtConstant(mlir::Value v) {
+  mlir::Operation *d = v.getDefiningOp();
+  while (d) {
+    llvm::StringRef n = d->getName().getStringRef();
+    if (n == "ttir.constant" || n == "arith.constant") {
+      return true;
+    }
+    if ((n == "ttir.reshape" || n == "ttir.broadcast" ||
+         n == "ttir.typecast" || n == "ttir.permute" ||
+         mlir::isa<mlir::ViewLikeOpInterface>(d)) &&
+        d->getNumOperands() >= 1) {
+      d = d->getOperand(0).getDefiningOp();
+    } else {
+      break;
+    }
+  }
+  return false;
+}
 
 /// True when the reduction touches a dim before the last two (tile C/R).
 /// Those go through the D2M outer-reduction path and must not be decomposed.
@@ -454,6 +482,38 @@ protected:
                                  ttcore::OOBVal::Undef);
   }
 
+  // MOLA local hook (2026-06-03): per-tensor L1/DRAM placement override.
+  // MOLA's policy layer (driven by mola.target) annotates individual
+  // tensors with a `mola.memspace` = "l1" | "dram" StringAttr — on the
+  // owning func argument for leaf inputs, or on the defining op for
+  // intermediates. Honored HERE, before the data-movement region is
+  // generated, so remote_load-vs-local-read codegen is derived
+  // consistently (a post-ttir-to-d2m MetalLayoutAttr flip is unsound —
+  // it desyncs the already-baked addressing). Absent the attr, the
+  // role default (memorySpaces[role]) is used unchanged.
+  static ttcore::MemorySpace resolveMolaMemSpace(Value v,
+                                                 ttcore::MemorySpace dflt) {
+    mlir::StringAttr s;
+    if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(v)) {
+      if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+              barg.getOwner()->getParentOp())) {
+        s = fn.getArgAttrOfType<mlir::StringAttr>(barg.getArgNumber(),
+                                                  "mola.memspace");
+      }
+    } else if (mlir::Operation *def = v.getDefiningOp()) {
+      s = def->getAttrOfType<mlir::StringAttr>("mola.memspace");
+    }
+    if (s) {
+      if (s.getValue() == "l1") {
+        return ttcore::MemorySpace::DeviceL1;
+      }
+      if (s.getValue() == "dram") {
+        return ttcore::MemorySpace::DeviceDRAM;
+      }
+    }
+    return dflt;
+  }
+
   // Insert ToLayout operations for a genericOp's operands and results,
   // including sharding and tilizing, with simple 1x1 grids; grid optimization
   // happens later in the D2MGridSelection pass.
@@ -464,15 +524,17 @@ protected:
     std::array<mlir::SmallVector<Value>, 2> result;
 
     for (Value operand : operandsAndResults[0]) {
-      result[0].push_back(createOptimalLayoutOp(operand, memorySpaces[0], tiled,
-                                                noCollapse, rewriter, oobVal));
+      result[0].push_back(createOptimalLayoutOp(
+          operand, resolveMolaMemSpace(operand, memorySpaces[0]), tiled,
+          noCollapse, rewriter, oobVal));
     }
     // Outputs always use Undef: they are destination buffers being written
     // into, so their padding fill value is irrelevant.  Only inputs need
     // identity-element OOB to prevent padded tiles from corrupting reductions.
     for (Value operand : operandsAndResults[1]) {
-      result[1].push_back(createOptimalLayoutOp(operand, memorySpaces[1], tiled,
-                                                noCollapse, rewriter));
+      result[1].push_back(createOptimalLayoutOp(
+          operand, resolveMolaMemSpace(operand, memorySpaces[1]), tiled,
+          noCollapse, rewriter));
     }
 
     return result;
@@ -766,6 +828,22 @@ protected:
     SmallVector<Value> origInputs;
     SmallVector<Value> origOutputs =
         createDpsOutputs(loc, rewriter, {resultType});
+    // MOLA local patch (2026-06-06): a constant fill's result feeds device
+    // compute as an INPUT, so place it in the input-role memory space, not
+    // the output role. With MOLA's dram-input/l1-output split the old
+    // output-role (L1) placement forced a device-side L1 -> logical -> DRAM
+    // restage between the fill and its consumer, and that intermediate
+    // restage silently produces wrong data (consumer degenerates to a
+    // passthrough; arg-fed matmuls staged dram-direct are exact). Routing
+    // the fill straight to the input space removes the broken roundtrip.
+    if (mlir::Operation *def = origOutputs.front().getDefiningOp()) {
+      def->setAttr("mola.memspace",
+                   mlir::StringAttr::get(
+                       rewriter.getContext(),
+                       memorySpaces[0] == ttcore::MemorySpace::DeviceL1
+                           ? "l1"
+                           : "dram"));
+    }
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true);
     assert(outputs.size() == 1);
@@ -1235,6 +1313,24 @@ private:
         llvm::any_of(ArrayRef<mlir::AffineMap>(logicalBcastMaps)
                          .take_front(origInputs.size()),
                      [](mlir::AffineMap map) { return !map.isIdentity(); });
+
+    // MOLA opt #2 (MOLA_TT_FUSE_DRAM): if molaPinActivations marked this
+    // elementwise op, pin its intermediate inputs into L1 so the producer->
+    // consumer round-trip stays in L1 (vs write-to-DRAM + read). Tag the adapted
+    // input operands' defining ops — resolveMolaMemSpace honors them below.
+    if (op->hasAttr("mola.in_l1")) {
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      for (Value in : origInputs) {
+        // Pin only genuine intermediates — never a constant/weight (mis-placing
+        // a constant fill on this path silently degenerates to a passthrough).
+        if (molaRootsAtConstant(in)) {
+          continue;
+        }
+        if (mlir::Operation *def = in.getDefiningOp()) {
+          def->setAttr("mola.memspace", l1);
+        }
+      }
+    }
 
     auto [inputs, outputs] =
         toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
@@ -2470,6 +2566,55 @@ private:
         mlir::cast<RankedTensorType>(origInputs[0].getType());
     bool noCollapse = (inputTensorType.getRank() > 2);
 
+    // MOLA opt #1: if molaPinReuseActivations marked this matmul, pin its LHS
+    // activation into L1 by tagging the (already-converted) LHS operand's
+    // mola.memspace, which resolveMolaMemSpace honors during the layout below.
+    // Done here — not at the producer — because conversion has remapped the
+    // value, and the matmul op (carrying the marker) is what survives to here.
+    if (op->hasAttr("mola.lhs_l1") && !origInputs.empty()) {
+      Value lhs = origInputs[0];
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(lhs)) {
+        if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                barg.getOwner()->getParentOp())) {
+          fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
+        }
+      } else if (mlir::Operation *def = lhs.getDefiningOp()) {
+        def->setAttr("mola.memspace", l1);
+      }
+    }
+    // MOLA local patch: honor the general `mola.in_l1` marker here too, not
+    // just `mola.lhs_l1`. The elementwise rewriter already does this, but a
+    // matmul-heavy block (grouped-query attention) reaches L1 through THIS
+    // pattern, so a placement expressed on its operands was silently dropped:
+    // measured 1212 mola.in_l1 tags on a GQA block producing byte-identical D2M
+    // (21760 L1 encodings, 13178 remote_load either way). Constants are skipped
+    // for the same reason as elsewhere -- placing a constant fill on this path
+    // degenerates the compute to a passthrough.
+    if (op->hasAttr("mola.in_l1")) {
+      auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+      if (::getenv("MOLA_TT_PLACE_DEBUG"))
+        llvm::errs() << "[matmul-in_l1] fired, " << origInputs.size()
+                     << " inputs\n";
+      for (Value in : origInputs) {
+        if (molaRootsAtConstant(in)) {
+          if (::getenv("MOLA_TT_PLACE_DEBUG"))
+            llvm::errs() << "[matmul-in_l1]   skip: roots at constant\n";
+          continue;
+        }
+        if (::getenv("MOLA_TT_PLACE_DEBUG"))
+          llvm::errs() << "[matmul-in_l1]   TAGGED\n";
+        if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(in)) {
+          if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                  barg.getOwner()->getParentOp())) {
+            fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
+          }
+        } else if (mlir::Operation *def = in.getDefiningOp()) {
+          def->setAttr("mola.memspace", l1);
+        }
+      }
+    }
+
     auto [inputs, outputs] = toLayoutOperandsAndResults(
         rewriter, {origInputs, origOutputs}, /*tiled*/ true, noCollapse);
 
@@ -2963,8 +3108,10 @@ public:
     // Check if we should do sub-tile H/W concat in the row-major layout.
     bool concatRowMajor = false;
     bool transposeRowMajor = false;
-    const int32_t alignToElements =
-        d2m::utils::getNocElementAlignmentL1(op, outType);
+    // (The NoC element-alignment probe that lived here is gone: the widened
+    // transposeRowMajor condition below subsumes it -- every row-major width
+    // concat now takes the transpose path, so there is nothing left to decide.
+    // Removed rather than left unused, since tt-mlir builds with -Werror.)
 
     if (dim >= rank - 2) {
       const int64_t tileSize =
@@ -2983,8 +3130,21 @@ public:
         // For a row-major width concat, if at least one (including the last)
         // row's size violates the NoC constraints, use the
         // transpose-concat-transpose trick.
-        if (rank >= 2 && concatRowMajor && (dim == rank - 1) &&
-            (dimSize % alignToElements != 0)) {
+        //
+        // MOLA 2026-08-25 (second defect). The NoC-element test alone is not
+        // sufficient here either. A width concat whose pieces are NoC-aligned
+        // but NOT TILE-aligned takes the plain row-major CompositeView path and
+        // returns garbage -- cat(x[..., :40], x[..., 40:]), an identity, comes
+        // back at 0.53 against TTNN's 1.00000.
+        //
+        // This was tried ONCE BEFORE and made things worse (0.78 -> 0.53),
+        // which is why it was reverted. That attempt was made while the slice
+        // rewrite above still mis-lowered non-tile-aligned START offsets, so
+        // the transposed inputs feeding the concat were themselves corrupt and
+        // the fallback could not have worked. With that fixed (standalone
+        // x[..., 40:] now measures 1.00000), the transpose path is worth
+        // re-testing on inputs that are actually correct.
+        if (rank >= 2 && concatRowMajor && (dim == rank - 1)) {
           transposeRowMajor = true;
           break;
         }
@@ -3297,6 +3457,63 @@ public:
           op, "could not lower constant fill via tile_fill");
     }
     rewriter.replaceOp(op, *filled);
+    return success();
+  }
+};
+
+// MOLA local patch (re-authored 2026-06-03, originally patch 08):
+// D2MConstantOpRewriter. Lowers ttir.constant (with DenseElementsAttr or
+// DenseResourceElementsAttr value) to arith.constant + d2m.to_layout.
+// Splat ttir.constants are canonicalized to ttir.full/zeros/ones earlier
+// and handled by D2MConstantFillOpRewriter; this pattern handles the
+// non-splat case (real model weights via dense_resource), required for QKV
+// / any HuggingFace Llama checkpoint flow through the TTMetal chain.
+//
+// Approach: replace ttir.constant with a plain arith.constant carrying the
+// same (logical, unencoded) tensor value. The type converter here is the
+// identity, so a ttir.constant result is an unencoded RankedTensorType —
+// exactly the form func arguments and other creation ops are in at this
+// stage. Downstream tensor-manipulation views (permute/reshape) and the
+// generic-operand staging (toLayoutOperandsAndResults -> d2m.to_layout)
+// then attach the metal_layout encoding / memory space uniformly, the same
+// way they do for func-argument inputs. MLIR's standard bufferization later
+// lowers arith.constant to a memref::GlobalOp + memref::GetGlobalOp pair,
+// which the flatbuffer translator already handles.
+//
+// (An earlier version additionally emitted a d2m.to_layout into a
+// no-encoding d2m.empty; with the identity type converter that produced a
+// degenerate to_layout, and a downstream permute/reshape then built a
+// d2m.view_layout across it that tripped the "view cannot change memory
+// space" verifier on real-weight QKV. Emitting just arith.constant keeps
+// the constant on the same logical path as func args and avoids it.)
+class D2MConstantOpRewriter : public OpConversionPattern<ttir::ConstantOp> {
+  using OpConversionPattern<ttir::ConstantOp>::OpConversionPattern;
+
+  LogicalResult
+  matchAndRewrite(ttir::ConstantOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto resultTy = mlir::dyn_cast<RankedTensorType>(op.getResult().getType());
+    if (!resultTy) {
+      return rewriter.notifyMatchFailure(op, "non-ranked-tensor result");
+    }
+    // Logical (unencoded) tensor type so the value attr's shape matches.
+    auto unencodedTy =
+        RankedTensorType::get(resultTy.getShape(), resultTy.getElementType());
+
+    auto valueAttr = mlir::dyn_cast<TypedAttr>(op.getValueAttr());
+    if (!valueAttr) {
+      return rewriter.notifyMatchFailure(
+          op, "ttir.constant value attr is not a TypedAttr");
+    }
+    if (auto shapedTy = mlir::dyn_cast<ShapedType>(valueAttr.getType())) {
+      if (shapedTy.getElementType() != unencodedTy.getElementType()) {
+        return rewriter.notifyMatchFailure(
+            op, "ttir.constant value element type doesn't match result");
+      }
+    }
+
+    rewriter.replaceOpWithNewOp<mlir::arith::ConstantOp>(op, unencodedTy,
+                                                         valueAttr);
     return success();
   }
 };
@@ -4346,17 +4563,65 @@ public:
     auto origOutputs =
         createDpsOutputs(op.getLoc(), rewriter, {op.getResult().getType()});
 
-    auto [inputs, outputs] =
-        toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
-                                   /*tiled*/ info.canBeTilized);
+    // MOLA local patch 33 (2026-09-05): a reshape that re-partitions the
+    // innermost dimension into or out of an extent that is not a multiple of
+    // the tile width is miscompiled when its operand lives in DRAM -- the
+    // view's addresses are correct in every inspectable layer, but resolving
+    // them against a DRAM-sharded buffer truncates each row start to a
+    // 32-element granule (measured 20480/81920 correct elements for
+    // [1,128,640] -> [1,128,16,40]; the exact source offset that comes back is
+    // s*640 + (h*40 // 32)*32 + j). The same view over an L1 operand is
+    // exact (1.00000 for extents 16, 40 and 80, and for the inverse merge).
+    // So the operand of such a reshape is staged through L1 by its own
+    // to_layout, which is a plain DRAM->L1 copy under an identity view and
+    // therefore not subject to the defect, and the view is taken over the L1
+    // buffer. Aligned reshapes and reshapes that keep the innermost extent
+    // are untouched. Known remaining gap: extent 20 is still wrong in L1
+    // (0.50), a second fault in the same family; no corpus model has it.
+    // Upstream issue #53 carries the full analysis.
+    bool stageInputInL1 = false;
+    if constexpr (std::is_same_v<TensorManipulationOp, ttir::ReshapeOp>) {
+      stageInputInL1 = reshapeRepartitionsInnerDimUnaligned(op) &&
+                       resolveMolaMemSpace(origInputs[0], memorySpaces[0]) ==
+                           ttcore::MemorySpace::DeviceDRAM;
+    }
+
+    std::array<mlir::SmallVector<Value>, 2> laidOut;
+    if (stageInputInL1) {
+      laidOut[0].push_back(createOptimalLayoutOp(
+          origInputs[0], ttcore::MemorySpace::DeviceL1,
+          /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+      for (Value output : origOutputs) {
+        laidOut[1].push_back(createOptimalLayoutOp(
+            output, resolveMolaMemSpace(output, memorySpaces[1]),
+            /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+      }
+    } else {
+      laidOut = toLayoutOperandsAndResults(rewriter, {origInputs, origOutputs},
+                                           /*tiled*/ info.canBeTilized);
+    }
+    auto &inputs = laidOut[0];
+    auto &outputs = laidOut[1];
     assert(outputs.size() == 1);
 
     auto outTy = mlir::cast<RankedTensorType>(outputs[0].getType());
     auto layout = mlir::cast<ttcore::MetalLayoutAttr>(outTy.getEncoding());
+    // A d2m.view_layout is a reinterpretation and MUST preserve the memory
+    // space of its source (verifier: "view cannot change memory space"). The
+    // result layout therefore takes the *input's* memory space, NOT the DPS
+    // output's — consistent with D2MPermuteRewriter (inputLayout.
+    // getMemorySpace()). When default-input-memspace != default-output-
+    // memspace (MOLA's dram-input/l1-output split, or a per-tensor
+    // mola.memspace), the DPS output sits in the output space while the
+    // input/view sits in the input space; using the output space built a
+    // memspace-crossing view that ICE'd real-weight QKV (transpose+reshape on
+    // a 2048-wide weight). (MOLA local patch 2026-06-03.)
+    auto inLayout = mlir::cast<ttcore::MetalLayoutAttr>(
+        mlir::cast<RankedTensorType>(inputs[0].getType()).getEncoding());
     auto newLayout = ttcore::MetalLayoutAttr::get(
-        layout.getContext(), layout.getLogicalShape(), layout.getMemorySpace(),
-        layout.getMemoryLayout(), layout.getCollapsedIntervals(),
-        layout.getDimAlignments());
+        layout.getContext(), layout.getLogicalShape(),
+        inLayout.getMemorySpace(), layout.getMemoryLayout(),
+        layout.getCollapsedIntervals(), layout.getDimAlignments());
     auto newOutTy = RankedTensorType::get(outTy.getShape(),
                                           outTy.getElementType(), newLayout);
 
@@ -4371,6 +4636,25 @@ public:
                                           op->getResult(0).getType()));
 
     return success();
+  }
+
+  // True when the reshape changes the innermost extent and either side's
+  // innermost extent is not a multiple of the 32-wide tile: the split or
+  // merge whose DRAM addressing is wrong (see patch 33 above).
+  static bool reshapeRepartitionsInnerDimUnaligned(ttir::ReshapeOp op) {
+    auto inputType = mlir::cast<RankedTensorType>(op.getInput().getType());
+    auto outputType = mlir::cast<RankedTensorType>(op.getResult().getType());
+    ArrayRef<int64_t> in = inputType.getShape();
+    ArrayRef<int64_t> out = outputType.getShape();
+    if (in.empty() || out.empty()) {
+      return false;
+    }
+    int64_t inInner = in.back(), outInner = out.back();
+    if (inInner == outInner || inInner <= 1 || outInner <= 1) {
+      return false;
+    }
+    constexpr int64_t kTileWidth = 32;
+    return (inInner % kTileWidth != 0) || (outInner % kTileWidth != 0);
   }
 
   static AffineMap projectLogicalMapToUnitDeviceSpace(Builder &builder,
@@ -4637,7 +4921,31 @@ public:
         d2m::utils::getNocElementAlignmentL1(op, inType);
 
     // Assume all shards in L1 already start at aligned addresses.
-    const bool isAlignedWidth = begins[rank - 1] % alignToElements == 0;
+    //
+    // MOLA 2026-08-25: the WIDTH predicate must ALSO require TILE alignment, not
+    // just NoC-element alignment. Declaring a width slice "NoC friendly" makes
+    // this pattern return failure() below and hands the slice to the default
+    // lowering, which needs the start offset on a tile boundary. For bf16
+    // alignToElements is 8 (16 NoC bytes / 2), so offsets like 40 and 48 pass the
+    // old test, take the default path, and come back UNCORRELATED:
+    //
+    //   x[..., 40:]  d2m -0.00349   ttnn 1.00000
+    //   x[..., 48:]  d2m -0.00175   ttnn 1.00000
+    //   x[..., 32:]  d2m  1.00000   ttnn 1.00000   (tile-aligned, fine)
+    //
+    // The slice WIDTH is irrelevant: x[..., :40] and x[..., :48] are exact. Only
+    // a non-tile-aligned START offset breaks. That is why RoPE's rotate_half,
+    // cat(-x[..., h:], x[..., :h]), corrupts attention exactly when head_dim/2 is
+    // not a multiple of 32 -- phi2 splits its 32 rotary channels at 16 and scores
+    // 0.708, while gemma2 (256 -> 128) is clean.
+    //
+    // HEIGHT is deliberately NOT tightened: height slices at non-tile-aligned
+    // offsets are exact (rows 40 and 48 both measure 1.00000), so the
+    // transpose-slice-transpose fallback that this now allows is a correct
+    // repair and not merely a different broken path.
+    const int64_t sliceTileWidth = ttcore::TileType::getDefaultShape()[1];
+    const bool isAlignedWidth = (begins[rank - 1] % alignToElements == 0) &&
+                                (begins[rank - 1] % sliceTileWidth == 0);
     const bool isAlignedHeight = begins[rank - 2] % alignToElements == 0;
     const bool notStridedWidth = step[rank - 1] == 1;
     const bool notStridedHeight = step[rank - 2] == 1;
@@ -5460,6 +5768,10 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
   // Creation ops 1:1 conversion.
   patterns.add<D2MEmptyOpRewriter>(typeConverter, ctx);
 
+  // Non-splat constant (real weights via dense_resource) -> arith.constant
+  // + d2m.to_layout (MOLA re-authored patch 08).
+  patterns.add<D2MConstantOpRewriter>(typeConverter, ctx);
+
   // Mesh ops 1:1 conversion.
   patterns.add<D2MMeshShardOpRewriter>(typeConverter, ctx);
 
@@ -5493,6 +5805,197 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
 #include "ttmlir/Conversion/Passes.h.inc"
 
 namespace {
+
+// MOLA opt #1 (MOLA_TT_L1_PIN_REUSE) + opt #2 (MOLA_TT_FUSE_DRAM): L1-pin
+// matmul-input activations (LHS, reused) and/or matmul-output intermediates
+// (round-trips), tagged via the `mola.memspace="l1"` attr that resolveMolaMemSpace
+// honors. Candidates ranked by DRAM bytes saved (input: #matmuls-as-LHS*bytes;
+// output: 2*bytes for the write+read round-trip) and greedily packed into a
+// SHARED reserved L1 budget so input+output pinning don't overflow. The matmul
+// ops are marked (mola.lhs_l1 / mola.out_l1); the matmul rewriter propagates L1
+// onto the adapted operands at layout time — tagging producer values here would
+// be lost to dialect-conversion remapping for intermediates.
+static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+  // MOLA now owns this placement DECISION (lifted into mola::molaPlaceTTActivations,
+  // lib/Conversion/MolaTTPlace.cpp, run by TTBackend before this pipeline). When
+  // MOLA has already decided (it stamps `mola.placement_done` and sets the same
+  // mola.lhs_l1 / mola.in_l1 tags this function would), skip — the fork is pure
+  // REALIZATION (resolveMolaMemSpace honors the tags below). This legacy in-line
+  // mirror is retained only for fork-standalone / non-MOLA callers.
+  if (module->hasAttr("mola.placement_done")) {
+    return;
+  }
+  // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
+  // default — they cut DRAM traffic (QKV reuse -50%, dim=2048 block -18%) while
+  // staying decode-exact, and are budget-bounded (candidates that don't fit L1
+  // are skipped, never overflow). Opt out per-optimization with =0.
+  const bool pinInput = [] {
+    const char *e = ::getenv("MOLA_TT_L1_PIN_REUSE");
+    return !(e && e[0] == '0');
+  }();
+  const bool pinOutput = [] {
+    const char *e = ::getenv("MOLA_TT_FUSE_DRAM");
+    return !(e && e[0] == '0');
+  }();
+  if (!pinInput && !pinOutput) {
+    return;
+  }
+  // TRAFFIC objective (mirror of mola::costPromoteTraffic in
+  // include/mola/Backends/CostFormula.h). Staging a reused / mcast-re-read /
+  // round-trip operand into on-chip L1 offloads DRAM regardless of dispatch
+  // time — which is exactly why the TIME cost model
+  // (BaselineCostModel::shouldPromoteToTier, used on NVGPU + tt-ttnn) REJECTS
+  // these on dispatch-bound Blackhole (200us dispatch >> transfer) while the
+  // TRAFFIC objective accepts. The budget is the REAL usable L1 (system
+  // descriptor); the mola.target shared.capacity_bytes only TIGHTENS it (min),
+  // so a capacity sweep drives TT placement (spec-sensitivity) while pins never
+  // exceed real L1 — and at the default spec (= real L1) the result is
+  // unchanged. See docs/plans/g1-cost-model-reconciliation-2026-06-09.md.
+  int64_t l1Cap = 0;
+  if (auto sysDesc = ttcore::getCurrentScopeSystemDesc(module)) {
+    if (!sysDesc.getChipDescs().empty()) {
+      l1Cap = static_cast<int64_t>(
+          sysDesc.getChipDescs().front().getUsableL1Size());
+    }
+  }
+  int64_t specCap = 0;
+  double bwGlobal = 0.0, bwDest = 0.0;
+  if (auto tgt = module->getAttrOfType<DictionaryAttr>("mola.target")) {
+    if (auto tiers = dyn_cast_or_null<DictionaryAttr>(tgt.get("tiers"))) {
+      if (auto sh = dyn_cast_or_null<DictionaryAttr>(tiers.get("shared"))) {
+        if (auto cap = dyn_cast_or_null<IntegerAttr>(sh.get("capacity_bytes"))) {
+          specCap = cap.getInt();
+        }
+        if (auto bw = dyn_cast_or_null<FloatAttr>(sh.get("bandwidth_gbps"))) {
+          bwDest = bw.getValueAsDouble();
+        }
+      }
+    }
+    if (auto edges = dyn_cast_or_null<ArrayAttr>(tgt.get("edges"))) {
+      for (Attribute e : edges) {
+        auto ed = dyn_cast<DictionaryAttr>(e);
+        if (!ed) {
+          continue;
+        }
+        auto src = dyn_cast_or_null<StringAttr>(ed.get("src"));
+        auto dst = dyn_cast_or_null<StringAttr>(ed.get("dst"));
+        if (src && dst && src.getValue() == "global" &&
+            dst.getValue() == "shared") {
+          if (auto bw = dyn_cast_or_null<FloatAttr>(ed.get("bandwidth_gbps"))) {
+            bwGlobal = bw.getValueAsDouble();
+          }
+        }
+      }
+    }
+  }
+  // Spec capacity only tightens the real-L1 budget (never grows it); fall back
+  // to the spec when there is no system descriptor.
+  if (specCap > 0 && (l1Cap <= 0 || specCap < l1Cap)) {
+    l1Cap = specCap;
+  }
+  if (l1Cap <= 0) {
+    return;
+  }
+  // Binary traffic decision: is the dest (L1) tier traffic-beneficial? With no
+  // bandwidth signal, assume on-chip is beneficial (preserves prior behavior).
+  // bwDest unset -> 10x fallback, matching the cost model. For L1 this is always
+  // true, so the byte result is unchanged; the gate makes the decision
+  // principled + spec-driven and would correctly decline a non-faster dest tier.
+  const bool trafficBeneficial =
+      (bwGlobal <= 0.0) ||
+      ((bwDest > 0.0 ? bwDest : 10.0 * bwGlobal) > bwGlobal);
+  if (!trafficBeneficial) {
+    return;
+  }
+  const int64_t reservePct = [] {
+    const char *p = ::getenv("MOLA_TT_L1_PIN_RESERVE_PCT");
+    return static_cast<int64_t>(p ? atoi(p) : 50);
+  }();
+  auto tensorBytes = [](RankedTensorType rt) -> int64_t {
+    int64_t elems = 1;
+    for (int64_t d : rt.getShape()) {
+      elems *= d;
+    }
+    return elems *
+           llvm::divideCeil(rt.getElementType().getIntOrFloatBitWidth(), 8);
+  };
+  struct Cand {
+    int64_t bytes;
+    int64_t benefit;
+    bool isOutput;
+    llvm::SmallVector<Operation *> matmuls;
+  };
+  llvm::SmallVector<Cand> cands;
+  // Input candidates: matmul-LHS activations (reuse).
+  if (pinInput) {
+    llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
+    module.walk([&](ttir::MatmulOp mm) {
+      // operand 0 is the activation (LHS); skip if it roots at a constant.
+      if (!molaRootsAtConstant(mm->getOperand(0))) {
+        lhsToMatmuls[mm->getOperand(0)].push_back(mm);
+      }
+    });
+    for (auto &kv : lhsToMatmuls) {
+      auto rt = dyn_cast<RankedTensorType>(kv.first.getType());
+      if (!rt || !rt.hasStaticShape()) {
+        continue;
+      }
+      const int64_t b = tensorBytes(rt);
+      cands.push_back({b, static_cast<int64_t>(kv.second.size()) * b,
+                       /*isOutput=*/false, kv.second});
+    }
+  }
+  // Fuse candidates (opt #2): intermediates consumed by NON-matmul ops
+  // (elementwise: add/mul/silu in SwiGLU + residual). Matmul outputs are
+  // already L1 and matmul-consumed intermediates are handled by opt #1, so the
+  // remaining DRAM round-trips are elementwise-consumed transients. Keep them in
+  // L1 by marking the CONSUMER op (mola.in_l1); the elementwise rewriter pins
+  // its inputs. Benefit = 2*bytes (write+read round-trip saved).
+  if (pinOutput) {
+    llvm::MapVector<Value, llvm::SmallVector<Operation *>> interToConsumers;
+    module.walk([&](Operation *op) {
+      if (isa<ttir::MatmulOp>(op)) {
+        return;
+      }
+      for (Value in : op->getOperands()) {
+        if (!in.getDefiningOp()) {
+          continue; // arg, not an intermediate
+        }
+        if (molaRootsAtConstant(in)) {
+          continue; // constant/weight — pinning it would miscompile
+        }
+        auto rt = dyn_cast<RankedTensorType>(in.getType());
+        if (rt && rt.hasStaticShape()) {
+          interToConsumers[in].push_back(op);
+        }
+      }
+    });
+    for (auto &kv : interToConsumers) {
+      auto rt = cast<RankedTensorType>(kv.first.getType());
+      const int64_t b = tensorBytes(rt);
+      cands.push_back({b, 2 * b, /*isOutput=*/true, kv.second});
+    }
+  }
+  llvm::sort(cands, [](const Cand &a, const Cand &b) {
+    if (a.benefit != b.benefit) {
+      return a.benefit > b.benefit;
+    }
+    return a.bytes < b.bytes;
+  });
+  const int64_t budget = (l1Cap * (100 - reservePct)) / 100;
+  int64_t used = 0;
+  for (const Cand &c : cands) {
+    if (used + c.bytes > budget) {
+      continue;
+    }
+    used += c.bytes;
+    StringRef marker = c.isOutput ? "mola.in_l1" : "mola.lhs_l1";
+    for (Operation *mm : c.matmuls) {
+      mm->setAttr(marker, UnitAttr::get(ctx));
+    }
+  }
+}
+
 class TTIRToD2MPass final
     : public mlir::tt::impl::TTIRToD2MBase<TTIRToD2MPass> {
 public:
@@ -5521,6 +6024,20 @@ public:
   void runOnOperation() override {
     MLIRContext *ctx = &getContext();
     ModuleOp module = getOperation();
+
+    // MOLA reuse-aware L1 pinning of matmul-input activations (opt #1,
+    // 2026-06-08). Upstream stages every activation in DRAM; each matmul then
+    // mcast-re-reads its LHS activation from DRAM across the output tile grid.
+    // MOLA pins matmul-LHS activations (args AND intermediates — e.g. the
+    // rms-normed activation feeding Q/K/V) into L1 so the contraction reads
+    // them from L1, cutting DRAM activation traffic. Done HERE, at the very
+    // start of TTIRToD2M, so the `mola.memspace` tags land on STABLE ops and
+    // are honored by resolveMolaMemSpace below — tagging earlier (in TTBackend,
+    // before the TTIR rewrites) loses intermediate tags. Ranked by (#matmuls
+    // using it as LHS)*bytes; greedily pinned within a reserved L1 budget
+    // (default 50%, MOLA_TT_L1_PIN_RESERVE_PCT). Weights (matmul RHS) are never
+    // candidates. Gated MOLA_TT_L1_PIN_REUSE=1.
+    molaPinActivations(module, ctx);
 
     TypeConverter typeConverter;
     typeConverter.addConversion([](Type t) { return t; });

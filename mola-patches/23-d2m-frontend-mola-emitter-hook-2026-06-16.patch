@@ -1,0 +1,43 @@
+diff --git a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+index 06263ac3e9..c0faab6b95 100644
+--- a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
++++ b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+@@ -158,6 +158,16 @@ struct D2MPipelineOptions : public PassPipelineOptions<D2MPipelineOptions> {
+                      "per-tensor placement annotation (empty = off)."),
+       llvm::cl::init("")};
+ 
++  // MOLA D2M-emitter hook: a pass-pipeline run BEFORE ttir-to-d2m (on TTIR), so
++  // MOLA can emit d2m.* ops itself for supported ops; createTTIRToD2MPass then
++  // lowers the remainder (emit-or-delegate). Empty = off; the named pass must be
++  // in the global pass registry at runtime.
++  Option<std::string> molaPreToD2MPipeline{
++      *this, "mola-pre-to-d2m-pipeline",
++      llvm::cl::desc("Pass-pipeline run before ttir-to-d2m for MOLA's own "
++                     "TTIR->D2M emission (empty = off)."),
++      llvm::cl::init("")};
++
+   // The allocator will not consider generic outputs eligible for spilling
+   // unless this option is turned on.
+   Option<bool> allowL1OutputSpilling{
+diff --git a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+index cee6ababa4..69062d33aa 100644
+--- a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
++++ b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+@@ -115,6 +115,17 @@ void createD2MFrontendPipeline(OpPassManager &pm,
+     toD2MOptions.collapseTensorsTo2D = options.collapseTensors;
+     toD2MOptions.enableMulticastInference = options.enableMulticastInference;
+   }
++  // MOLA D2M-emitter hook: run MOLA's own TTIR->D2M emission BEFORE
++  // createTTIRToD2MPass. MOLA emits d2m.* for supported ops; the TTIRToD2M pass
++  // below lowers the remainder (emit-or-delegate). No-op when the option is empty.
++  if (!options.molaPreToD2MPipeline.empty()) {
++    if (mlir::failed(mlir::parsePassPipeline(options.molaPreToD2MPipeline, pm,
++                                             llvm::errs()))) {
++      llvm::errs() << "createD2MFrontendPipeline: failed to parse "
++                      "mola-pre-to-d2m-pipeline='"
++                   << options.molaPreToD2MPipeline << "'\n";
++    }
++  }
+   pm.addPass(tt::createTTIRToD2MPass(toD2MOptions));
+   // MOLA local hook (2026-05-12): run an out-of-tree per-tensor placement
+   // policy right after ttir-to-d2m (tensors now carry MetalLayoutAttr

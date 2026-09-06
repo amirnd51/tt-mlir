@@ -336,6 +336,15 @@ void closeMeshDevice(Device parentMesh) {
   ::tt::tt_metal::ReadMeshDeviceProfilerResults(metalMeshDevice);
 #endif
 
+  // Cached MeshWorkloads hold tt_metal::Programs bound to this device. Drop
+  // them before the close, for the parent AND every submesh: submit() executes
+  // against the submesh returned by openDeviceProgramMeshDevice, so that is
+  // what the cache is keyed on.
+  for (const auto &subMesh : metalMeshDevice.get_submeshes()) {
+    clearProgramCacheForDevice(subMesh.get());
+  }
+  clearProgramCacheForDevice(&metalMeshDevice);
+
   metalMeshDevice.close();
 }
 
@@ -1053,10 +1062,24 @@ std::vector<Tensor> submit(Device deviceHandle, Binary executableHandle,
       return parentMeshDevice;
     }
 
+    // Cache one submesh per (parent, shape): create_submesh registers the
+    // child in the parent, so creating one per submit() accumulates a submesh
+    // per dispatch — after ~8 in-process re-dispatches the device hard-stalls
+    // (MOLA G3 re-dispatch bug).
+    static std::map<std::tuple<int, int64_t, int64_t>,
+                    std::shared_ptr<tt_metal::distributed::MeshDevice>>
+        submeshCache;
+    auto key = std::make_tuple(parentMeshDevice->id(), subMeshShape[0],
+                               subMeshShape[1]);
+    if (auto it = submeshCache.find(key); it != submeshCache.end()) {
+      return it->second;
+    }
     LOG_INFO("Create submesh for a deviceProgram with shape [", subMeshShape[0],
              ", ", subMeshShape[1], "]");
-    return parentMeshDevice->create_submesh(
+    auto sub = parentMeshDevice->create_submesh(
         tt_metal::distributed::MeshShape(subMeshShape[0], subMeshShape[1]));
+    submeshCache[key] = sub;
+    return sub;
   };
 
   std::vector<std::shared_ptr<tt_metal::distributed::MeshDevice>>
@@ -1078,7 +1101,8 @@ std::vector<Tensor> submit(Device deviceHandle, Binary executableHandle,
 
     outputs = executeMeshDeviceProgram(deviceProgramMeshDevice[i].get(),
                                        deviceProgram, inputs,
-                                       common::DylibManager(fbb.dylibs()));
+                                       common::DylibManager(fbb.dylibs()),
+                                       executableHandle);
 
     LOG_ASSERT(outputs.size() == program->outputs()->size(),
                "Outputs size mismatch");

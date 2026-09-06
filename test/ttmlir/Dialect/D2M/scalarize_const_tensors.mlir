@@ -1,6 +1,13 @@
 // RUN: ttmlir-opt --d2m-scalarize-const-tensors %s -o %t
 // RUN: FileCheck %s --input-file=%t
 
+// Float add/sub/mul/div keep their constant as a TILE (mola-patches 34,
+// 2026-09-05): the SFPU scalar-immediate path truncates its result into a
+// 16-bit DST (measured round-toward-zero on 100% of a bf16 multiply by a
+// constant on Blackhole) where the two-tile SFPU op rounds to nearest even.
+// Only the non-arithmetic op below still shows what scalarization would do
+// to a float; integer scalars are unaffected.
+
 #map = affine_map<(d0, d1) -> (d0, d1)>
 #parallel = #ttcore.iterator_type<parallel>
 #layout = #ttcore.metal_layout<logical_shape = 128x128, dim_alignments = 32x32, collapsed_intervals = dense<[[0, 1], [1, 2]]> : tensor<2x2xi64>, l1, sharded>
@@ -9,8 +16,8 @@
 
 module {
 
-  // CHECK-LABEL: func.func @test_add_const_tensor_scalarize
-  func.func @test_add_const_tensor_scalarize(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> tensor<1x1x4x4x!ttype_f32, #layout> {
+  // CHECK-LABEL: func.func @test_add_const_tensor_stays_tile
+  func.func @test_add_const_tensor_stays_tile(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> tensor<1x1x4x4x!ttype_f32, #layout> {
     %e0 = d2m.empty() : tensor<128x128xf32>
     %e1 = d2m.empty() : tensor<1x1x4x4x!ttype_f32, #layout>
     %to_fill = d2m.to_layout %e0, %e1 : tensor<128x128xf32> into tensor<1x1x4x4x!ttype_f32, #layout> -> tensor<1x1x4x4x!ttype_f32, #layout>
@@ -40,7 +47,7 @@ module {
         ins(%arg0, %splat : tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>)
         outs(%generic_out : tensor<1x1x4x4x!ttype_f32, #layout>) {
     ^bb1:
-      // CHECK: %[[S:.*]] = arith.constant 2.500000e+00 : f32
+      // CHECK-NOT: arith.constant 2.500000e+00 : f32
       %iter0 = d2m.block_index(0) : index
       %iter1 = d2m.block_index(1) : index
       %buffer0 = tensor.empty() : tensor<4x4x!ttype_f32>
@@ -50,7 +57,7 @@ module {
       %12 = tensor.empty() : tensor<4x4x!ttype_f32>
       %13 = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel"]} ins(%10, %11 : tensor<4x4x!ttype_f32>, tensor<4x4x!ttype_f32>) outs(%12 : tensor<4x4x!ttype_f32>) {
       ^bb0(%in: !ttype_f32, %in_0: !ttype_f32, %out: !ttype_f32):
-        // CHECK: "d2m.tile_add"(%{{.*}}, %[[S]]) : (!ttcore.tile<32x32, f32>, f32)
+        // CHECK: "d2m.tile_add"(%{{.*}}, %{{.*}}) : (!ttcore.tile<32x32, f32>, !ttcore.tile<32x32, f32>)
         %14 = "d2m.tile_add"(%in, %in_0) : (!ttype_f32, !ttype_f32) -> !ttype_f32
         linalg.yield %14 : !ttype_f32
       } -> tensor<4x4x!ttype_f32>
@@ -59,8 +66,8 @@ module {
     return %3 : tensor<1x1x4x4x!ttype_f32, #layout>
   }
 
-  // CHECK-LABEL: func.func @test_mul_const_tensor_scalarize
-  func.func @test_mul_const_tensor_scalarize(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> tensor<1x1x4x4x!ttype_f32, #layout> {
+  // CHECK-LABEL: func.func @test_mul_const_tensor_stays_tile
+  func.func @test_mul_const_tensor_stays_tile(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> tensor<1x1x4x4x!ttype_f32, #layout> {
     %e0 = d2m.empty() : tensor<128x128xf32>
     %e1 = d2m.empty() : tensor<1x1x4x4x!ttype_f32, #layout>
     %to_fill = d2m.to_layout %e0, %e1 : tensor<128x128xf32> into tensor<1x1x4x4x!ttype_f32, #layout> -> tensor<1x1x4x4x!ttype_f32, #layout>
@@ -90,7 +97,7 @@ module {
         ins(%arg0, %splat : tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>)
         outs(%generic_out : tensor<1x1x4x4x!ttype_f32, #layout>) {
     ^bb1:
-      // CHECK: %[[S:.*]] = arith.constant 3.000000e+00 : f32
+      // CHECK-NOT: arith.constant 3.000000e+00 : f32
       %iter0 = d2m.block_index(0) : index
       %iter1 = d2m.block_index(1) : index
       %buffer0 = tensor.empty() : tensor<4x4x!ttype_f32>
@@ -100,7 +107,7 @@ module {
       %12 = tensor.empty() : tensor<4x4x!ttype_f32>
       %13 = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel"]} ins(%10, %11 : tensor<4x4x!ttype_f32>, tensor<4x4x!ttype_f32>) outs(%12 : tensor<4x4x!ttype_f32>) {
       ^bb0(%in: !ttype_f32, %in_0: !ttype_f32, %out: !ttype_f32):
-        // CHECK: "d2m.tile_mul"(%{{.*}}, %[[S]]) : (!ttcore.tile<32x32, f32>, f32)
+        // CHECK: "d2m.tile_mul"(%{{.*}}, %{{.*}}) : (!ttcore.tile<32x32, f32>, !ttcore.tile<32x32, f32>)
         %14 = "d2m.tile_mul"(%in, %in_0) : (!ttype_f32, !ttype_f32) -> !ttype_f32
         linalg.yield %14 : !ttype_f32
       } -> tensor<4x4x!ttype_f32>
@@ -160,8 +167,8 @@ module {
     return %3 : tensor<1x1x4x4x!ttype_f32, #layout>
   }
 
-  // CHECK-LABEL: func.func @test_multi_user_layout_chains_scalarize
-  func.func @test_multi_user_layout_chains_scalarize(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> (tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>) {
+  // CHECK-LABEL: func.func @test_multi_user_layout_chains_stay_tiles
+  func.func @test_multi_user_layout_chains_stay_tiles(%arg0: tensor<1x1x4x4x!ttype_f32, #layout>) -> (tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>) {
     %e0 = d2m.empty() : tensor<128x128xf32>
     %e1 = d2m.empty() : tensor<1x1x4x4x!ttype_f32, #layout>
     %to_fill = d2m.to_layout %e0, %e1 : tensor<128x128xf32> into tensor<1x1x4x4x!ttype_f32, #layout> -> tensor<1x1x4x4x!ttype_f32, #layout>
@@ -194,12 +201,12 @@ module {
 
     %generic_out0 = d2m.empty() : tensor<1x1x4x4x!ttype_f32, #layout>
     // CHECK: d2m.generic
-    // CHECK-NEXT: ins(%{{.*}} : tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>)
+    // CHECK-NEXT: ins(%{{.*}}, %{{.*}} : tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>, tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>)
     %out0 = d2m.generic {block_factors = [1, 1], grid = #ttcore.grid<1x1>, indexing_maps = [#map, #map, #map], iterator_types = [#parallel, #parallel], threads = [#d2m.thread<unified>]}
         ins(%arg0, %splat0 : tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>)
         outs(%generic_out0 : tensor<1x1x4x4x!ttype_f32, #layout>) {
     ^bb1:
-      // CHECK: %[[S0:.*]] = arith.constant 4.000000e+00 : f32
+      // CHECK-NOT: arith.constant 4.000000e+00 : f32
       %iter0 = d2m.block_index(0) : index
       %iter1 = d2m.block_index(1) : index
       %buffer0 = tensor.empty() : tensor<4x4x!ttype_f32>
@@ -209,7 +216,7 @@ module {
       %dst = tensor.empty() : tensor<4x4x!ttype_f32>
       %result = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel"]} ins(%load0, %load1 : tensor<4x4x!ttype_f32>, tensor<4x4x!ttype_f32>) outs(%dst : tensor<4x4x!ttype_f32>) {
       ^bb0(%in: !ttype_f32, %in_0: !ttype_f32, %out: !ttype_f32):
-        // CHECK: "d2m.tile_add"(%{{.*}}, %[[S0]]) : (!ttcore.tile<32x32, f32>, f32)
+        // CHECK: "d2m.tile_add"(%{{.*}}, %{{.*}}) : (!ttcore.tile<32x32, f32>, !ttcore.tile<32x32, f32>)
         %add = "d2m.tile_add"(%in, %in_0) : (!ttype_f32, !ttype_f32) -> !ttype_f32
         linalg.yield %add : !ttype_f32
       } -> tensor<4x4x!ttype_f32>
@@ -218,12 +225,12 @@ module {
 
     %generic_out1 = d2m.empty() : tensor<1x1x4x4x!ttype_f32, #layout>
     // CHECK: d2m.generic
-    // CHECK-NEXT: ins(%{{.*}} : tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>)
+    // CHECK-NEXT: ins(%{{.*}}, %{{.*}} : tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>, tensor<1x1x4x4x!ttcore.tile<32x32, f32>, #layout>)
     %out1 = d2m.generic {block_factors = [1, 1], grid = #ttcore.grid<1x1>, indexing_maps = [#map, #map, #map], iterator_types = [#parallel, #parallel], threads = [#d2m.thread<unified>]}
         ins(%arg0, %splat1 : tensor<1x1x4x4x!ttype_f32, #layout>, tensor<1x1x4x4x!ttype_f32, #layout>)
         outs(%generic_out1 : tensor<1x1x4x4x!ttype_f32, #layout>) {
     ^bb1:
-      // CHECK: %[[S1:.*]] = arith.constant 4.000000e+00 : f32
+      // CHECK-NOT: arith.constant 4.000000e+00 : f32
       %iter0 = d2m.block_index(0) : index
       %iter1 = d2m.block_index(1) : index
       %buffer0 = tensor.empty() : tensor<4x4x!ttype_f32>
@@ -233,7 +240,7 @@ module {
       %dst = tensor.empty() : tensor<4x4x!ttype_f32>
       %result = linalg.generic {indexing_maps = [#map, #map, #map], iterator_types = ["parallel", "parallel"]} ins(%load0, %load1 : tensor<4x4x!ttype_f32>, tensor<4x4x!ttype_f32>) outs(%dst : tensor<4x4x!ttype_f32>) {
       ^bb0(%in: !ttype_f32, %in_0: !ttype_f32, %out: !ttype_f32):
-        // CHECK: "d2m.tile_mul"(%{{.*}}, %[[S1]]) : (!ttcore.tile<32x32, f32>, f32)
+        // CHECK: "d2m.tile_mul"(%{{.*}}, %{{.*}}) : (!ttcore.tile<32x32, f32>, !ttcore.tile<32x32, f32>)
         %mul = "d2m.tile_mul"(%in, %in_0) : (!ttype_f32, !ttype_f32) -> !ttype_f32
         linalg.yield %mul : !ttype_f32
       } -> tensor<4x4x!ttype_f32>

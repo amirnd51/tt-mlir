@@ -1,0 +1,43 @@
+diff --git a/lib/Dialect/D2M/IR/D2MOps.cpp b/lib/Dialect/D2M/IR/D2MOps.cpp
+index 9759899453..60ef43d7ea 100644
+--- a/lib/Dialect/D2M/IR/D2MOps.cpp
++++ b/lib/Dialect/D2M/IR/D2MOps.cpp
+@@ -124,8 +124,36 @@ d2m::FullOp::bufferize(mlir::RewriterBase &rewriter,
+   auto memrefType = mlir::cast<mlir::MemRefType>(
+       getBufferType(getResult(), options, state, invocationStack).value());
+ 
+-  auto denseAttr =
+-      mlir::DenseElementsAttr::get(getResult().getType(), getFillValueAttr());
++  // The fill_value attr is constrained to F32Attr|I32Attr by the op def,
++  // but the result tensor's element type may be narrower (bf16, f16, i8,
++  // …). DenseElementsAttr::get asserts that the FloatAttr/IntegerAttr's
++  // type matches the shaped type's element type, so cast the fill value
++  // through APFloat/APInt of the result element type before constructing
++  // the dense attr.
++  auto resultTy = getResult().getType();
++  auto eltTy = resultTy.getElementType();
++  mlir::Attribute fillAttr;
++  if (auto fv = mlir::dyn_cast<mlir::FloatAttr>(getFillValueAttr())) {
++    auto fpTy = mlir::dyn_cast<mlir::FloatType>(eltTy);
++    if (!fpTy) {
++      return emitOpError() << "fill_value is float but element type is not";
++    }
++    llvm::APFloat val = fv.getValue();
++    bool losesInfo = false;
++    val.convert(fpTy.getFloatSemantics(),
++                llvm::APFloat::rmNearestTiesToEven, &losesInfo);
++    fillAttr = mlir::FloatAttr::get(fpTy, val);
++  } else if (auto iv = mlir::dyn_cast<mlir::IntegerAttr>(getFillValueAttr())) {
++    auto intTy = mlir::dyn_cast<mlir::IntegerType>(eltTy);
++    if (!intTy) {
++      return emitOpError() << "fill_value is int but element type is not";
++    }
++    fillAttr = mlir::IntegerAttr::get(intTy,
++                                       iv.getValue().sextOrTrunc(intTy.getWidth()));
++  } else {
++    return emitOpError() << "fill_value must be FloatAttr or IntegerAttr";
++  }
++  auto denseAttr = mlir::DenseElementsAttr::get(resultTy, fillAttr);
+ 
+   mlir::memref::GlobalOp global = ttcore::createGlobal(
+       getOperation()->getParentOfType<ModuleOp>(), memrefType, denseAttr);
