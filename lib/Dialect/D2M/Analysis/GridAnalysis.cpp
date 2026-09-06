@@ -393,11 +393,18 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
 // Only input operands and only tiled ones are touched; the split must still
 // map onto a legal physical grid. MOLA_TT_D2M_REDUCTION_SPLIT=stream restores
 // the upstream choice for an A/B.
+// `budgetGrid` is the grid the shard is budgeted against: the operand's own
+// grid with every dim the output also indexes replaced by the output's grid
+// there, which is what normalizeOperandGridsForGeneric imposes afterwards.
+// On a 10x11 grid a [128, 768] f32 input is virtual-gridded along K only
+// (rows 1, K 33), and budgeting its 4 row tiles as one shard picked 3 blocks
+// where the normalized 1-row shard fits in one.
 static void clampReductionSplit(GenericOp genericOp, unsigned operandIndex,
                                 RankedTensorType operandType,
                                 ArrayRef<int64_t> physShape,
                                 ArrayRef<int64_t> targetGrid,
                                 uint64_t budgetBytes, uint32_t numBuffers,
+                                ArrayRef<int64_t> budgetGrid,
                                 llvm::SmallVectorImpl<int64_t> &grid) {
   auto tileType =
       mlir::dyn_cast<ttcore::TileType>(operandType.getElementType());
@@ -430,8 +437,9 @@ static void clampReductionSplit(GenericOp genericOp, unsigned operandIndex,
     int64_t otherGridVolume = 1;
     for (size_t i = 0; i < grid.size(); ++i) {
       if (i != pos) {
-        otherTiles *= llvm::divideCeil(physShape[i], grid[i]);
-        otherGridVolume *= grid[i];
+        const int64_t g = i < budgetGrid.size() ? budgetGrid[i] : grid[i];
+        otherTiles *= llvm::divideCeil(physShape[i], g);
+        otherGridVolume *= g;
       }
     }
     const int64_t extent = physShape[pos];
@@ -563,11 +571,6 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
     physicalShapes.push_back(physShape);
     auto optimalGrid =
         utils::computeOptimalGrid(operandType, physShape, targetGrid);
-    if (reductionShardBudgetBytes && isReduceOnlyGeneric) {
-      clampReductionSplit(genericOp, operandIndex, operandType, physShape,
-                          targetGrid, *reductionShardBudgetBytes,
-                          /*numBuffers=*/2, optimalGrid);
-    }
     optimalOperandGrids.push_back(optimalGrid);
 
     OperandGridInfo info;
@@ -602,6 +605,37 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
     }
 
     result.operandInfos.push_back(std::move(info));
+  }
+
+  // Reduction-axis split, after every operand's optimal grid is known so the
+  // budget can use the output's grid on the dims it shares with the input.
+  if (reductionShardBudgetBytes && isReduceOnlyGeneric) {
+    const unsigned outputBegin = genericOp.getOutputs().getBeginOperandIndex();
+    AffineMap outMap = indexingMaps[outputBegin];
+    for (unsigned i = 0; i < outputBegin && i < optimalOperandGrids.size();
+         ++i) {
+      SmallVector<int64_t> budgetGrid(optimalOperandGrids[i]);
+      AffineMap inMap = indexingMaps[i];
+      for (auto [pos, expr] : llvm::enumerate(inMap.getResults())) {
+        auto dimExpr = mlir::dyn_cast<AffineDimExpr>(expr);
+        if (!dimExpr || pos >= budgetGrid.size()) {
+          continue;
+        }
+        for (auto [q, oexpr] : llvm::enumerate(outMap.getResults())) {
+          auto od = mlir::dyn_cast<AffineDimExpr>(oexpr);
+          if (od && od.getPosition() == dimExpr.getPosition() &&
+              q < optimalOperandGrids[outputBegin].size()) {
+            budgetGrid[pos] = optimalOperandGrids[outputBegin][q];
+          }
+        }
+      }
+      auto operandType = mlir::cast<mlir::RankedTensorType>(
+          genericOp.getInputsAndOutputs()[i].getType());
+      clampReductionSplit(genericOp, i, operandType, physicalShapes[i],
+                          perOperandTargetGrids[i], *reductionShardBudgetBytes,
+                          /*numBuffers=*/2, budgetGrid, optimalOperandGrids[i]);
+      result.operandInfos[i].selectedGrid = optimalOperandGrids[i];
+    }
   }
 
   // Pick the padding tile shape from the output-derived consumer info first
