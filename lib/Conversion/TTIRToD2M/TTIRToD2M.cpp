@@ -1308,11 +1308,66 @@ private:
 
     // Implicit bcast if tile-level bcast exists or any input indexing map is
     // not identity.
-    const bool isImplicitBcast =
-        !logicalBcastMaps.empty() &&
-        llvm::any_of(ArrayRef<mlir::AffineMap>(logicalBcastMaps)
-                         .take_front(origInputs.size()),
-                     [](mlir::AffineMap map) { return !map.isIdentity(); });
+    auto computeIsImplicitBcast = [&]() {
+      return !logicalBcastMaps.empty() &&
+             llvm::any_of(ArrayRef<mlir::AffineMap>(logicalBcastMaps)
+                              .take_front(origInputs.size()),
+                          [](mlir::AffineMap map) { return !map.isIdentity(); });
+    };
+    bool isImplicitBcast = computeIsImplicitBcast();
+
+    // MOLA local patch 39 (2026-09-06): an f32 elementwise op does not fold a
+    // broadcast operand into its kernel. The folded broadcast is a
+    // `tile_bcast` (unary_bcast, an srcA op), so the kernel is no longer
+    // SFPU-only and every f32 operand it reads comes through the 19-bit
+    // source register as Tf32 (-0.024% per read, one-sided; see
+    // sfpuOnlyReadPorts in D2MToTTMetal). Materialising the broadcast as its
+    // own op leaves the elementwise kernel reading whole f32 tiles through
+    // unpack-to-dest, exactly. Measured on Pythia-160m's QKV Linear with the
+    // bias added to the f32 accumulator: implicit broadcast 0.99988 of the
+    // f32 reference, materialised operand 1.00011 (bf16 torch 1.00009);
+    // experiments/tt/probes/pythia/py_linear_*. Same-rank operands only;
+    // MOLA_TT_D2M_F32_BCAST_MATERIALIZE=0 restores the fold.
+    if (isImplicitBcast && origInputs.size() >= 2) {
+      const char *sw = std::getenv("MOLA_TT_D2M_F32_BCAST_MATERIALIZE");
+      const bool enabled = !(sw && sw[0] == '0' && sw[1] == '\0');
+      auto isF32 = [](Value v) {
+        auto t = mlir::dyn_cast<RankedTensorType>(v.getType());
+        return t && mlir::isa<mlir::Float32Type>(t.getElementType());
+      };
+      const bool anyF32 = isF32(op->getResult(0)) ||
+                          llvm::any_of(origInputs, isF32);
+      if (enabled && anyF32) {
+        auto outType =
+            mlir::cast<RankedTensorType>(op->getResult(0).getType());
+        bool changed = false;
+        for (size_t j = 0; j < origInputs.size(); ++j) {
+          if (logicalBcastMaps[j].isIdentity()) {
+            continue;
+          }
+          auto inType = mlir::cast<RankedTensorType>(origInputs[j].getType());
+          if (inType.getRank() != outType.getRank()) {
+            continue;
+          }
+          SmallVector<int64_t> bcastDims =
+              ttmlir::utils::getBroadcastDimensions<int64_t>(
+                  inType.getShape(), outType.getShape());
+          auto bcast = rewriter.create<ttir::BroadcastOp>(
+              ttmlir::utils::appendLocationSuffix(loc, "_f32_bcast"),
+              RankedTensorType::get(outType.getShape(),
+                                    inType.getElementType(),
+                                    inType.getEncoding()),
+              origInputs[j], bcastDims);
+          origInputs[j] = bcast.getResult();
+          changed = true;
+        }
+        if (changed) {
+          std::tie(logicalBcastMaps, tileBcastTypes) =
+              getImplicitBcastInfo(rewriter, origInputs, origOutputs);
+          isImplicitBcast = computeIsImplicitBcast();
+        }
+      }
+    }
 
     // MOLA opt #2 (MOLA_TT_FUSE_DRAM): if molaPinActivations marked this
     // elementwise op, pin its intermediate inputs into L1 so the producer->
