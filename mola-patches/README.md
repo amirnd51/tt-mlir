@@ -364,6 +364,63 @@ matmul probes unchanged. The MOLA lit test
 the scheduled DST pass's output and the reload under the switch. The fork's
 own lit suite is not runnable on this box.
 
+### 38 — permute views map output to input coordinates; conversion-time transposes stay decomposed (2026-09-06)
+
+`38-ttir-to-d2m-permute-view-direction-decomposed-transposes-2026-09-06.patch` —
+`lib/Conversion/TTIRToD2M/TTIRToD2M.cpp`
+
+**Found by the Pythia ladder.** Pythia-160m's layer-0 QK^T read cosine 0.944
+on D2M as a program output while the same generic consumed on the device
+(the `ctx` stage) read 0.99991, and every MOLA switch left the figure
+untouched. The reduction: rotary on k only is right, rotary on q is wrong;
+the rotated q is a width concat of two 8-wide slices (`rotate_half` on 16 of
+64 head dims) of a head-transposed QKV chunk, and the same concat over a q
+taken straight from the host is exact. Three defects in TTIR-to-D2M's
+handling of permutes that are not plain transposes:
+
+1. **The permute view's direction.** `permuteLogicalInfo` built
+   `results[i] = d_{permutation[i]}`, the inverse of the output-to-input map
+   every other tensor-manipulation view uses (`sliceLogicalInfo`'s
+   `d * step + begin`, `reshapeLogicalInfo`'s stated contract, rearrange's
+   inverse pattern map). Involutions, which every transpose is, are their own
+   inverse, so it was invisible until a fold produced a 3-cycle. A lone
+   `[1, 2, 0, 3, 4]` permute of a `[2, 3, 4, 32, 32]` bf16 tensor read cosine
+   0.08 on Blackhole (`experiments/tt/probes/layout/perm_perm3_outer`);
+   1.00000 now. `test/Integration/d2m-permute-view-direction.mlir` pins the
+   map.
+
+2. **Conversion-time transposes were folded away.** The concat rewriter's
+   transpose-concat-transpose path and the slice rewriter's
+   transpose-slice-transpose path create `ttir.permute` ops during
+   conversion, after `TTIRDecomposeComplexPermute` has run. Legalization
+   tries an op's folder first, and `ttir::PermuteOp::fold` merges a permute
+   into its producing permute unless it carries the `decomposed` marker, so
+   the H/W transpose of a head-transposed operand became `[0, 2, 3, 1]`, a
+   complex permute that moves the innermost dim. For the concat that gave a
+   row-major view no DMA materialises correctly (the sampled-coalescing
+   fallback); for the slice, the legalizer rolled the rewrite back and the
+   slice fell through to a plain width view at a non-tile-aligned start over
+   a DRAM operand, which reads the row start truncated to a 32-element granule
+   (the patch-33 class): `cat(q[..., 8:16], q[..., :8])` returned
+   `cat(q[..., :8], q[..., :8])`. Both rewriters now mark their transposes
+   `decomposed`. `test/Integration/d2m-concat-transposes-stay-decomposed.mlir`
+   pins the shape: no 3-cycle view in either direction, the pieces transposed
+   on tiles, the offset-8 slice a height view; it rejects the IR from before
+   each half of the fix.
+
+3. **The permute view rewriter accepted complex permutes.** Its guard only
+   rejected the exact inner swap. It now declines any permute that moves the
+   innermost dim, so a complex permute that reappears later fails loudly
+   instead of lowering to a wrong view.
+
+Measured after this patch (Blackhole, first quietbox): the 16|48 rotated q
+as a program output 0.25 -> 1.00000 (`qkvrot_rot_out`); Pythia layer-0 QK^T
+0.944 -> 0.99999 and its softmax 0.648 -> 0.99985; the rest of the Pythia
+ladder unchanged. The probes live in `experiments/tt/probes/layout` and
+`experiments/tt/probes/pythia`; the ladder driver is
+`experiments/tt/probes/pythia/ladder_stats.py`. The fork's own lit suite is
+not runnable on this box.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —
