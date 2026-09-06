@@ -5,6 +5,7 @@
 #include "ttmlir/Dialect/D2M/Analysis/GridAnalysis.h"
 
 #include "ttmlir/Asserts.h"
+#include "ttmlir/Dialect/D2M/IR/D2MGenericRegionOps.h"
 #include "ttmlir/Dialect/D2M/Utils/GridSelectionUtils.h"
 #include "ttmlir/Dialect/D2M/Utils/Utils.h"
 #include "ttmlir/Dialect/TTCore/IR/TTCore.h"
@@ -531,6 +532,22 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
   llvm::SmallVector<llvm::SmallVector<int64_t>> optimalOperandGrids;
   llvm::SmallVector<llvm::SmallVector<int64_t>> physicalShapes;
 
+  // The reduction-split clamp is for tile_reduce generics only. A matmul's
+  // K blocks accumulate through the packer's L1 accumulation, which is
+  // exact, and its K streaming (grid 1x78, block_factors [1, 1, 30] on a
+  // 128x768 x 768x2304 f32 matmul) is a structure the reblocking below
+  // assumes: clamping it broke GPT-2's compile (2026-09-06).
+  bool sawReduce = false;
+  bool sawMatmul = false;
+  genericOp->walk([&](Operation *op) {
+    if (isa<TileReduceSumOp, TileReduceMaxOp, TileReduceMeanOp>(op)) {
+      sawReduce = true;
+    } else if (isa<TileMatmulOp>(op)) {
+      sawMatmul = true;
+    }
+  });
+  const bool isReduceOnlyGeneric = sawReduce && !sawMatmul;
+
   for (auto [operandIndex, operand] :
        llvm::enumerate(genericOp.getInputsAndOutputs())) {
     auto operandType = mlir::cast<mlir::RankedTensorType>(operand.getType());
@@ -546,7 +563,7 @@ GenericGridAnalysisResult GridAnalysis::analyzeGenericOp(
     physicalShapes.push_back(physShape);
     auto optimalGrid =
         utils::computeOptimalGrid(operandType, physShape, targetGrid);
-    if (reductionShardBudgetBytes) {
+    if (reductionShardBudgetBytes && isReduceOnlyGeneric) {
       clampReductionSplit(genericOp, operandIndex, operandType, physShape,
                           targetGrid, *reductionShardBudgetBytes,
                           /*numBuffers=*/2, optimalGrid);

@@ -2344,48 +2344,21 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
   // classifier in DstRegisterAnalysis.cpp reads the same switch.
   const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
   const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
-  // Not when an operand is a broadcast: the SFPU binary path with a
-  // tile_bcast operand computed TinyLlama's RoPE (q[1,32,128,64] times
-  // cos[1,1,128,64] over the heads) at cosine 0.318 against 0.99999 on the
-  // FPU (2026-09-05, MOLA experiments/tt/probes/qwen/qwen_rope_only.py with
-  // MOLA_PROBE_CHECKPOINT=TinyLlama/TinyLlama-1.1B-Chat-v1.0); the same
-  // module on Qwen2.5-1.5B (12 heads of 128) was exact, so it is a
-  // shape-dependent defect in the bcast-into-DST staging, kept out of reach
-  // until it is understood.
-  // At this stage a broadcast operand is a load whose access map carries a
-  // constant (the `0` in `affine.load %sv[%i, 0, %k, %l]`), not a tile_bcast
-  // op; the other operand is indexed by loop IVs on that dimension.
-  //
-  // A tile_bcast operand (a row or column vector replicated across the
-  // tile by unary_bcast, which is what a LayerNorm's `x * rstd` and
-  // `x * weight` are) is NOT excluded (2026-09-06): it is a full DST tile
-  // recomputed per iteration, and the FPU mul_tiles_bcast it would
-  // otherwise take is 0.088% high on bf16 (MOLA experiments/tt/probes/
-  // normbias/bcast_mul_bf16, 26% of products off by one ulp, TTNN exact),
-  // which put every bf16 LayerNorm output 0.2% high.
-  auto isBroadcast = [](mlir::Value v) {
-    if (auto load = v.getDefiningOp<mlir::affine::AffineLoadOp>()) {
-      for (mlir::AffineExpr expr : load.getAffineMap().getResults()) {
-        if (mlir::isa<mlir::AffineConstantExpr>(expr)) {
-          return true;
-        }
-      }
-      return false;
-    }
-    if (auto load = v.getDefiningOp<mlir::memref::LoadOp>()) {
-      for (mlir::Value index : load.getIndices()) {
-        if (mlir::matchPattern(index, mlir::m_Constant())) {
-          return true;
-        }
-      }
-    }
-    return false;
-  };
+  // Broadcast operands included (2026-09-06). Patch 34 kept a multiply with
+  // a broadcast operand on the FPU because the SFPU path computed
+  // TinyLlama's RoPE (q[1,32,128,64] * cos[1,1,128,64]) at cosine 0.318.
+  // The cause was the dst slice pitch in InsertDstRegisterAccess: an
+  // operand whose access map carries a constant index owns fewer dst dims
+  // than its neighbour, and its slice base was computed from its own dims,
+  // landing inside the other operand's slots. buildIndices now takes the
+  // pitch from the whole compute nest, and that probe is bit-identical to
+  // TTNN on the SFPU. The FPU broadcast product is 0.088% high on bf16
+  // (MOLA experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
+  // float stays there.
   auto lhsType = getOperand(0).getType();
   if (sfpuMul && mlir::isa<mlir::tt::ttcore::TileType>(lhsType) &&
       mlir::isa<mlir::FloatType>(
-          mlir::cast<mlir::tt::ttcore::TileType>(lhsType).getElementType()) &&
-      !isBroadcast(getOperand(0)) && !isBroadcast(getOperand(1))) {
+          mlir::cast<mlir::tt::ttcore::TileType>(lhsType).getElementType())) {
     if (mlir::isa<mlir::tt::ttcore::TileType>(getOperand(1).getType())) {
       return {0, 1};
     }

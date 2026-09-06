@@ -1661,10 +1661,36 @@ buildIndices(PatternRewriter &rewriter, Location loc,
     }
   }
 
+  // (MOLA, 2026-09-06) The slice pitch is the footprint of the WHOLE
+  // compute nest, not of this operand's own dst dims. An operand whose
+  // access map carries a constant index (a broadcast: `%cos[%i, 0, %k, %l]`
+  // against `%q[%i, %j, %k, %l]` with j over two tiles) owns fewer dst dims
+  // than its neighbour, and a pitch taken from its own dims put slice 1 at
+  // DST[1], inside slice 0's [0, 2): the second head multiplied cos by cos
+  // (TinyLlama RoPE at cosine 0.318 on the SFPU, patch 34's excluded case).
+  // The access's own index operands omit a broadcast dimension entirely
+  // (the constant result consumes no operand), so the footprint is taken
+  // from the loops that enclose the access inside the dst scope.
+  int64_t nestFootprint = 1;
+  bool nestFootprintKnown = true;
+  for (affine::AffineForOp loop :
+       collectEnclosingAffineLoopsForDstAccess(access.op, linalgRoot)) {
+    if (!isDstScopeIV(loop.getInductionVar(), linalgRoot)) {
+      continue;
+    }
+    std::optional<int64_t> trip = tryGetConstantTripCount(loop.getOperation());
+    if (!trip) {
+      nestFootprintKnown = false;
+      break;
+    }
+    nestFootprint *= *trip;
+  }
+
   unsigned numDstDims = dstOperands.size();
   if (numDstDims == 0) {
-    AffineMap dstAccessMap =
-        AffineMap::getConstantMap(dstSlice, rewriter.getContext());
+    const int64_t pitch = nestFootprintKnown ? nestFootprint : 1;
+    AffineMap dstAccessMap = AffineMap::getConstantMap(
+        static_cast<int64_t>(dstSlice) * pitch, rewriter.getContext());
     return {l1AccessMap, l1AccessIndices, dstAccessMap, {}};
   }
 
@@ -1677,8 +1703,10 @@ buildIndices(PatternRewriter &rewriter, Location loc,
     }
   }
 
+  const int64_t pitch =
+      nestFootprintKnown ? std::max<int64_t>(stride, nestFootprint) : stride;
   AffineExpr linearExpr = getAffineConstantExpr(
-      static_cast<int64_t>(dstSlice) * stride, rewriter.getContext());
+      static_cast<int64_t>(dstSlice) * pitch, rewriter.getContext());
 
   for (unsigned i = 0; i < numDstDims; ++i) {
     AffineExpr dimExpr = getAffineDimExpr(i, rewriter.getContext());
