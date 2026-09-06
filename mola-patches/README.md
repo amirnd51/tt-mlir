@@ -458,6 +458,40 @@ RMSNorm, the 128-wide softmax and Qwen attention without the sink unchanged.
 With this patch MOLA turns `sink-bias` on by default. The fork's own lit
 suite is not runnable on this box.
 
+### 40 — the allocator visits its liveness graph and orders its planner input deterministically (2026-09-06)
+
+`40-d2m-allocator-deterministic-order-2026-09-06.patch` —
+`lib/Dialect/D2M/Transforms/Allocate.cpp`
+
+**A compiler that gives two answers to one input.** bloom-560m read 0.99932
+in one campaign and 0.99789 in the next at the same commit. Dispatch was not
+the cause (any one binary dispatches bit-identically), the compile was: the
+same input reported a required L1 of 5038080 B in most compiles and
+5226496 B in about one in four, so the exact Linear epilogue fitted in one
+compile and took MOLA's fallback in the next. Ten single-threaded compiles
+agreed to the byte, and with ASLR off every compile agreed, which named the
+mechanism: `analyzeAllocOps` walked `livenessJoinGraph`, a DenseMap keyed
+by `Operation *`, and inserted every alloc into `analysis.memrefs` in that
+order, so the planner's packing tie-break followed the hash of pointer
+values and hence the process's address-space layout (MLIR's per-op
+threading widened the spread; MOLA's `TTBackend` also compiles the TT flow
+single-threaded now).
+
+The graph is walked in program order, and the planner's input is ordered by
+a deterministic policy: L1 size descending with program order for ties
+(first-fit-decreasing) by default. That choice is empirical: with plain
+program order bloom is over capacity every time (5038080 B against
+1461376 usable on the vendor grid); reverse program order, size descending
+and last-use descending all fit; live-span descending does not.
+`MOLA_TT_D2M_ALLOC_ORDER` = `program | reverse | size | last | span` selects
+another policy for an A/B and is declared must-be-absent in the campaign's
+evidence table.
+
+Measured after this patch (Blackhole, first quietbox): bloom fits 3/3 and
+reads 0.99932 (`d2m-remeasure-14.json`, D2M 11/24 over both floors, every
+other row bit-identical to `-12`); ViT-base still takes the epilogue
+fallback. The fork's own lit suite is not runnable on this box.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —
