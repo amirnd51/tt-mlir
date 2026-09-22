@@ -44,6 +44,61 @@ public:
     if (!op) {
       return false;
     }
+    // MOLA-LOCAL: never fuse an op that BROADCASTS.
+    //
+    // The D2M path miscompiles a broadcasting elementwise op, silently. The
+    // minimal reproducer is two ops -- `(a + b) * 2.0` on 1x128x896 bf16
+    // returns cosine 0.32 against torch, where the same program compiled
+    // without the carve returns 0.999999 and the exit code is clean either
+    // way. The constant becomes a 1x1x1 tensor occupying one 32x32 tile and is
+    // broadcast against 4x28 tiles; most output elements are right and a large
+    // subset is garbage, with a median element ratio of exactly 1.0.
+    //
+    // Twenty-three fixtures place the fault here and nowhere else. Every
+    // program whose fused group contains a BROADCASTING MULTIPLY is wrong --
+    // (a+b)*2.0, (a*2.0)+b, (a+b)*3.0, and all six gelu variants, gelu being an
+    // inlined polynomial full of scalar multiplies. Every program whose
+    // multiplies are tensor-tensor is bit-exact -- relu(a)*b, exp(a)*b,
+    // sqrt(a)*b, sigmoid(a)*b, erf(a)*b, a*b+a, a*(a+b), (a+b)*(a-b), and
+    // chains of up to 16 multiply/adds. Op identity, chain length, generated
+    // kernel size and reconvergence were each tested and each ruled out.
+    //
+    // The same machinery fails louder on whole models: TTIRToD2M.cpp's
+    // D2MBroadcastRewriter::buildOuterBcastViewMap aborts on
+    // `inputShape.size() == outputShape.size()` with 4 == 8, a logical rank
+    // compared against a metal-layout rank.
+    //
+    // This declines EVERY broadcast, not only multiply. `rsqrt(abs(a)+1.0)*b`
+    // broadcasts on an add and is bit-exact, so the rule gives up one known-good
+    // shape. That is deliberate: the boundary between the good and bad cases is
+    // not characterised, and a rule fitted to the cases measured so far would
+    // fail in the direction that returns wrong numbers with no diagnostic.
+    // Declining a fusion only forgoes speed.
+    // EXPERIMENT (2026-09-21): restrict the decline to MULTIPLY.
+    // Declining every broadcast is correct on all 23 fixtures but costs the
+    // entire speedup (residual-ln 1.3374x -> 0.9979x, layernorm 1.4177x ->
+    // 1.0003x), because layer_norm broadcasts mean and variance back across
+    // the normalised dimension and excluding those dissolves the fused group.
+    // Every WRONG fixture contains a broadcasting multiply and every correct
+    // one does not, so this asks whether the narrower rule keeps correctness
+    // and restores the win. Flip MOLA_CARVE_DECLINE_ALL_BCAST=1 to get the
+    // conservative rule back.
+    const bool declineAllBroadcasts =
+        ::getenv("MOLA_CARVE_DECLINE_ALL_BCAST") != nullptr;
+    const bool isMultiply = mlir::isa<MultiplyOp>(op);
+    if ((declineAllBroadcasts || isMultiply) && op->getNumResults() == 1 &&
+        op->getNumOperands() > 1) {
+      auto resultTy = mlir::dyn_cast<RankedTensorType>(op->getResult(0).getType());
+      if (!resultTy) {
+        return false;
+      }
+      for (Value operand : op->getOperands()) {
+        auto operandTy = mlir::dyn_cast<RankedTensorType>(operand.getType());
+        if (!operandTy || operandTy.getShape() != resultTy.getShape()) {
+          return false;
+        }
+      }
+    }
     // Eltwise unary ops.
     if (mlir::isa<AbsOp, CbrtOp, CeilOp, SignOp, CosOp, ExpOp, ErfOp, ErfcOp,
                   FloorOp, GeluOp, IsFiniteOp, LogicalNotOp, BitwiseNotOp,
