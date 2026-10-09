@@ -163,6 +163,39 @@ bool needsFlattenAndSwap(llvm::ArrayRef<int64_t> inputShape,
          countTrailingOnes(inputShape) > 0;
 }
 
+// MOLA local patch 42 (2026-10-09): the trailing-1 status flips AND the
+// non-1 dimensions are repartitioned in the same reshape, e.g.
+//   [16, 128] -> [2048, 1]        [1, 2048] -> [1, 16, 128, 1]
+//   [2048, 1] -> [16, 128]
+// Neither predicate above matches these (the first wants identical non-1
+// dimensions, the second only the trailing-to-leading direction), so they
+// reached TTIRToD2M as one view. A row-major view cannot move the innermost
+// dimension: measured on Wormhole, [16, 128] -> [2048, 1] returned 1712 of
+// 2048 elements wrong, on every worker grid, while each half of it is exact
+// ([16, 128] -> [1, 2048], then [1, 2048] -> [2048, 1], which the singleton
+// case already decomposes). TTIR's own folds build exactly this reshape out
+// of exact ones: they merge reshape chains and commute a reshape through an
+// elementwise op. The decomposition of the singleton case is already general
+// (a reshape that keeps the innermost extent's position, then a swap that
+// moves only a size-1 dimension), so the same code serves; it is taken only
+// when that swap is not the identity.
+bool isTrailingSingletonRepartition(llvm::ArrayRef<int64_t> inputShape,
+                                    llvm::ArrayRef<int64_t> outputShape) {
+  if (inputShape.empty() || outputShape.empty()) {
+    return false;
+  }
+  if (getNonOneDims(inputShape) == getNonOneDims(outputShape)) {
+    return false;
+  }
+  const bool inTrailing = inputShape.back() == 1;
+  const bool outTrailing = outputShape.back() == 1;
+  if (inTrailing == outTrailing) {
+    return false;
+  }
+  llvm::ArrayRef<int64_t> flipped = outTrailing ? outputShape : inputShape;
+  return flipped.size() >= 2 && flipped[flipped.size() - 2] != 1;
+}
+
 enum class DecomposeType { SingletonTranspose, FlattenAndSwap };
 
 //===----------------------------------------------------------------------===//
@@ -188,6 +221,8 @@ public:
         opsToProcess.push_back({op, DecomposeType::SingletonTranspose});
       } else if (needsFlattenAndSwap(inputShape, outputShape)) {
         opsToProcess.push_back({op, DecomposeType::FlattenAndSwap});
+      } else if (isTrailingSingletonRepartition(inputShape, outputShape)) {
+        opsToProcess.push_back({op, DecomposeType::SingletonTranspose});
       }
     });
 
