@@ -1337,7 +1337,21 @@ private:
       };
       const bool anyF32 = isF32(op->getResult(0)) ||
                           llvm::any_of(origInputs, isF32);
-      if (enabled && anyF32) {
+      // MOLA local patch 43 (2026-10-09): the same for an INTEGER operand,
+      // where the fold is not a rounding but a wrong answer. `tile_bcast`
+      // moves the operand through the FPU's source register, which carries
+      // floats; an i32 does not survive it. Measured on Wormhole:
+      // eq(i32[1,2048], i32[1,1]) -- a position compared with an index
+      // vector, the mask of a served KV-cache write -- returned 1158 wrong
+      // elements of 2048 with the scalar folded in, and none with both
+      // operands at full shape or with the same values compared as f32.
+      // Not switchable: there is no arm in which the fold is right.
+      auto isInteger = [](Value v) {
+        auto t = mlir::dyn_cast<RankedTensorType>(v.getType());
+        return t && mlir::isa<mlir::IntegerType>(t.getElementType());
+      };
+      const bool anyInteger = llvm::any_of(origInputs, isInteger);
+      if ((enabled && anyF32) || anyInteger) {
         auto outType =
             mlir::cast<RankedTensorType>(op->getResult(0).getType());
         bool changed = false;
