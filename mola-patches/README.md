@@ -540,13 +540,15 @@ Cost: one tile-transpose kernel per such reshape. No lit test in the fork
 
 **Patch 39's rule, for integers, where the fold is not a rounding error but
 a wrong answer.** A broadcast folded into an elementwise kernel is a
-`tile_bcast`, an FPU srcA op; the source register carries floats, and an i32
-operand does not survive it. `ttir.eq(i32[1,2048], i32[1,1])` -- an index
+`tile_bcast` in that kernel. `ttir.eq(i32[1,2048], i32[1,1])` -- an index
 vector compared with a position, the write mask of a served KV cache --
 returned 1158 wrong elements of 2048 on Wormhole. The same compare with both
 operands at full shape is exact, and so is the same compare on f32
 conversions of the operands; subtraction of two full-shape i32 tensors is
-exact too. So the compare kernel is sound and the broadcast is not.
+exact too; and an integer `tile_bcast` in a kernel of its own is exact (it
+is what the materialised broadcast lowers to). So the compare kernel is
+sound, the broadcast kernel is sound, and the two in one kernel are not.
+Why is not established.
 
 When any INPUT of an elementwise op has an integer element type and an input
 is implicitly broadcast (same rank), the rewriter creates a `ttir.broadcast`
