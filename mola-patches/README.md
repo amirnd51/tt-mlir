@@ -492,6 +492,71 @@ reads 0.99932 (`d2m-remeasure-14.json`, D2M 11/24 over both floors, every
 other row bit-identical to `-12`); ViT-base still takes the epilogue
 fallback. The fork's own lit suite is not runnable on this box.
 
+### 42 — a reshape that repartitions and flips the trailing-1 status is decomposed (2026-10-09)
+
+`42-ttir-reshape-repartition-trailing-singleton-2026-10-09.patch` —
+`lib/Dialect/TTIR/Transforms/DecomposeComplexReshape.cpp`
+
+(41 is taken on `mola-local-patched-2026-08-24` by a TTNN carve change this
+branch does not carry; these two sit on `mola-local-wormhole-bringup`,
+branched from record 40.)
+
+**A view cannot move the innermost dimension, and one case was still being
+lowered as a view.** `ttir-decompose-complex-reshape` already splits a
+reshape whose only effect is to move a size-1 dimension across the innermost
+position into a reshape plus a last-two-dim permute (a real tile transpose),
+and the trailing-to-leading flatten. It missed the reshape that does both at
+once in the other direction: `[16,128] -> [2048,1]`,
+`[1,2048] -> [1,16,128,1]`, `[2048,1] -> [16,128]`. Those have different
+non-1 dimensions, so `isSingletonTranspose` says no, and no trailing 1 on the
+input, so `needsFlattenAndSwap` says no. They reached TTIRToD2M as a single
+`d2m.view_layout`.
+
+Measured on Wormhole (loudbox2, chip 0, `mola-c --backend tt -O0`, against
+`--backend tt-ttnn`): `multiply; reshape [16,128] -> [2048,1]` returned 1712
+of 2048 elements wrong (cosine 0.43), identically on worker grids 1x1, 2x2,
+4x4 and the default. Each half is exact on its own (`[16,128] -> [1,2048]`,
+and `[1,2048] -> [2048,1]`, which the singleton case decomposes). Writing the
+two halves in the source does not help: TTIR merges reshape chains and
+commutes a reshape through an elementwise op, and rebuilds the single bad
+reshape (seen in the IR before `ttir-to-d2m`). In qwen35-0.8b's served
+linear-attention layer this made a column broadcast hold one value per 16
+rows: layer hidden state 0.9509 against tt-ttnn before, 0.999994 after.
+
+The new predicate takes exactly the reshapes whose trailing-1 status flips
+with different non-1 dimensions, when the last-two swap on the flipped side
+is not the identity, and sends them through the existing singleton
+decomposition, which is already general (a reshape that keeps the innermost
+extent in place, then a swap that moves only a size-1 dimension). Not
+covered: the degenerate case where that swap is the identity (`[..., 1, 1]`).
+Cost: one tile-transpose kernel per such reshape. No lit test in the fork
+(its suite is not runnable on this box); MOLA pins it in
+`test/Integration/d2m-reshape-repartition-to-column.mlir`.
+
+### 43 — an elementwise op materialises an integer broadcast operand (2026-10-09)
+
+`43-ttir-to-d2m-integer-broadcast-materialised-2026-10-09.patch` —
+`lib/Conversion/TTIRToD2M/TTIRToD2M.cpp`
+
+**Patch 39's rule, for integers, where the fold is not a rounding error but
+a wrong answer.** A broadcast folded into an elementwise kernel is a
+`tile_bcast`, an FPU srcA op; the source register carries floats, and an i32
+operand does not survive it. `ttir.eq(i32[1,2048], i32[1,1])` -- an index
+vector compared with a position, the write mask of a served KV cache --
+returned 1158 wrong elements of 2048 on Wormhole. The same compare with both
+operands at full shape is exact, and so is the same compare on f32
+conversions of the operands; subtraction of two full-shape i32 tensors is
+exact too. So the compare kernel is sound and the broadcast is not.
+
+When any INPUT of an elementwise op has an integer element type and an input
+is implicitly broadcast (same rank), the rewriter creates a `ttir.broadcast`
+for it, as patch 39 does for f32. `MOLA_TT_D2M_F32_BCAST_MATERIALIZE=0` does
+not turn this arm off: there is no configuration in which the fold is right.
+In qwen35-0.8b's served full-attention layer the mask came out true for 263
+rows of 2048 where one is right and the cache was overwritten: state:k
+0.6389 against tt-ttnn before, 1.000000 after. MOLA pins it in
+`test/Integration/d2m-integer-broadcast-materialised.mlir`.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —
