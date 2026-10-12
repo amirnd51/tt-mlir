@@ -559,6 +559,29 @@ rows of 2048 where one is right and the cache was overwritten: state:k
 0.6389 against tt-ttnn before, 1.000000 after. MOLA pins it in
 `test/Integration/d2m-integer-broadcast-materialised.mlir`.
 
+### 44 — host transfers at either end of a function stay outside the trace (2026-10-12)
+
+`44-ttnn-trace-hoist-host-transfers-outside-2026-10-12.patch` —
+`lib/Dialect/TTNN/Transforms/TTNNTraceHoistTransform.cpp`
+
+A program compiled for a mesh of chips (`mesh-shape=1,8`) takes its inputs
+on the host and distributes them itself (`distribute_tensor`, `to_device`)
+and gathers its results back (`from_device`, `aggregate_tensor`). The trace
+hoist took them into the trace with everything else and aborted building a
+DRAM slot type for a host tensor ("Memory layout is required for
+non-SystemMemory buffer type"). Ops at the two ends of the function that
+touch a system-memory tensor are now left outside the hoisted range; one
+in the middle is handled, or refused, as before.
+
+Seen from MOLA on eight Wormhole chips: a sharded 27B MLP block with an
+`all_reduce` compiles at `-O2`, runs, and gives the untraced output (PCC
+0.99999 against PyTorch); per added block 0.34..0.35 ms traced against
+0.71 ms untraced. What the wrapper still does around the trace is wasteful:
+the distributed input goes to the chips, is read back, and is written into
+the trace's slot. MOLA pins the compile in
+`test/Integration/ttnn-mesh-program.mlir`. Not checked: tt-mlir's own lit
+suite; a 2-D mesh.
+
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
 `32-d2m-pow-exponent-float-bits-2026-08-27.patch` —

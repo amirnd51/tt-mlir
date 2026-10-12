@@ -1,0 +1,76 @@
+From d823638774872126aae3a2338209fe8f4a804bde Mon Sep 17 00:00:00 2001
+From: Amir Nassereldine <46420889+amirnd51@users.noreply.github.com>
+Date: Mon, 12 Oct 2026 09:31:53 +0000
+Subject: [PATCH] ttnn trace hoist: host transfers at either end of a function
+ stay outside the trace
+
+A program compiled for a mesh of chips takes its inputs on the host and
+distributes them itself (distribute_tensor, to_device) and gathers its
+results back (from_device, aggregate_tensor). The pass hoisted them with
+everything else and aborted building a DRAM slot type for a host tensor
+("Memory layout is required for non-SystemMemory buffer type"). The ops
+at the two ends of the function that touch a system-memory tensor are now
+left outside the hoisted range; one in the middle is handled as before.
+
+Checked from MOLA on eight Wormhole chips (mesh 1,8): a sharded MLP block
+with an all_reduce compiles with enable-trace, runs, and matches the
+untraced output. Not checked: tt-mlir's own lit suite; a 2-D mesh.
+---
+ .../Transforms/TTNNTraceHoistTransform.cpp    | 34 +++++++++++++++++++
+ 1 file changed, 34 insertions(+)
+
+diff --git a/lib/Dialect/TTNN/Transforms/TTNNTraceHoistTransform.cpp b/lib/Dialect/TTNN/Transforms/TTNNTraceHoistTransform.cpp
+index d62e8657b..8c8b00475 100644
+--- a/lib/Dialect/TTNN/Transforms/TTNNTraceHoistTransform.cpp
++++ b/lib/Dialect/TTNN/Transforms/TTNNTraceHoistTransform.cpp
+@@ -66,6 +66,26 @@ private:
+     return shouldHoist;
+   }
+ 
++  // True when an operand or a result of the op is a tensor in system
++  // memory. A program compiled for a mesh of chips takes its inputs on the
++  // host and distributes them itself (distribute_tensor, to_device), and
++  // gathers its results back (from_device, aggregate_tensor). Those are
++  // host transfers, not device commands: a trace cannot hold them, and a
++  // host tensor has no device slot type.
++  static bool touchesSystemMemory(Operation *op) {
++    auto onHost = [](mlir::Type type) {
++      auto tensorType = mlir::dyn_cast<RankedTensorType>(type);
++      if (!tensorType) {
++        return false;
++      }
++      auto layout =
++          mlir::dyn_cast_if_present<TTNNLayoutAttr>(tensorType.getEncoding());
++      return layout && layout.getBufferType() == BufferType::SystemMemory;
++    };
++    return llvm::any_of(op->getOperandTypes(), onHost) ||
++           llvm::any_of(op->getResultTypes(), onHost);
++  }
++
+   std::uint64_t getUniqueTraceFuncIndex() {
+     static std::atomic<std::uint64_t> traceFunctionIndex = 0;
+     return traceFunctionIndex.fetch_add(1, std::memory_order_relaxed);
+@@ -1012,6 +1032,20 @@ private:
+         }
+       }
+ 
++      // Leave the host transfers at either end of the function outside the
++      // trace (see touchesSystemMemory). Only the ends are trimmed: one in
++      // the middle is handled, or refused, as before.
++      while (firstHoistable < lastHoistable &&
++             (!shouldHoistOp(allOps[firstHoistable]) ||
++              touchesSystemMemory(allOps[firstHoistable]))) {
++        firstHoistable++;
++      }
++      while (lastHoistable > firstHoistable &&
++             (!shouldHoistOp(allOps[lastHoistable]) ||
++              touchesSystemMemory(allOps[lastHoistable]))) {
++        lastHoistable--;
++      }
++
+       // Collect all hoistable ops between first and last. Creation ops (e.g.
+       // ttnn.constant / ttnn.full materialized mid-graph by op decompositions
+       // such as SDPA) are not hoistable, but they only depend on the device
+-- 
+2.34.1
+
