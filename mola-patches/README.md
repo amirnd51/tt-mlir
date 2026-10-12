@@ -571,7 +571,10 @@ hoist took them into the trace with everything else and aborted building a
 DRAM slot type for a host tensor ("Memory layout is required for
 non-SystemMemory buffer type"). Ops at the two ends of the function that
 touch a system-memory tensor are now left outside the hoisted range; one
-in the middle is handled, or refused, as before.
+in the middle that reads only arguments and ops already above the region
+(a mesh program distributes an argument where it is first used) is sunk
+above it, as mid-graph creation ops are; any other is handled, or
+refused, as before. Two commits (`d82363877`, `bac858f87`).
 
 Seen from MOLA on eight Wormhole chips: a sharded 27B MLP block with an
 `all_reduce` compiles at `-O2`, runs, and gives the untraced output (PCC
@@ -579,8 +582,10 @@ Seen from MOLA on eight Wormhole chips: a sharded 27B MLP block with an
 0.71 ms untraced. What the wrapper still does around the trace is wasteful:
 the distributed input goes to the chips, is read back, and is written into
 the trace's slot. MOLA pins the compile in
-`test/Integration/ttnn-mesh-program.mlir`. Not checked: tt-mlir's own lit
-suite; a 2-D mesh.
+`test/Integration/ttnn-mesh-program.mlir`. A real layer (Qwen3.8-27B
+linear attention, sharded for mesh 1,8) compiles traced and agrees with
+its one-chip traced compile (PCC 0.99991 after three calls). Not checked:
+tt-mlir's own lit suite; a 2-D mesh.
 
 ### 32 — scalar `pow` exponent is float bits, not an integer (2026-08-27)
 
