@@ -1053,9 +1053,34 @@ private:
       // them above the trace region so they are treated as regular trace inputs
       // (recreated per execution), matching how leading creation ops are
       // handled when const-eval is disabled.
+      //
+      // A host transfer of a function argument in the middle (a mesh
+      // program distributes an argument where it is first used) is sunk
+      // above the region the same way: it reads only arguments, the device,
+      // and what is already above the region, so moving it up changes
+      // nothing it sees.
       llvm::SmallVector<Operation *> creationOpsToSink;
+      // What is already above the region: the ops before it, and the
+      // transfers sunk so far.
+      llvm::SmallPtrSet<Operation *, 16> sunk(
+          allOps.begin(), allOps.begin() + firstHoistable);
+      auto isArgumentTransfer = [&](Operation *op) {
+        if (!touchesSystemMemory(op)) {
+          return false;
+        }
+        return llvm::all_of(op->getOperands(), [&](mlir::Value operand) {
+          if (mlir::isa<mlir::BlockArgument>(operand)) {
+            return true;
+          }
+          Operation *def = operand.getDefiningOp();
+          return def && sunk.contains(def);
+        });
+      };
       for (size_t i = firstHoistable; i <= lastHoistable; i++) {
-        if (shouldHoistOp(allOps[i])) {
+        if (isArgumentTransfer(allOps[i])) {
+          creationOpsToSink.push_back(allOps[i]);
+          sunk.insert(allOps[i]);
+        } else if (shouldHoistOp(allOps[i])) {
           opsToHoist.push_back(allOps[i]);
         } else if (allOps[i]
                        ->hasTrait<
