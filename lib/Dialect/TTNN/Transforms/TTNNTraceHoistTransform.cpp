@@ -66,6 +66,26 @@ private:
     return shouldHoist;
   }
 
+  // True when an operand or a result of the op is a tensor in system
+  // memory. A program compiled for a mesh of chips takes its inputs on the
+  // host and distributes them itself (distribute_tensor, to_device), and
+  // gathers its results back (from_device, aggregate_tensor). Those are
+  // host transfers, not device commands: a trace cannot hold them, and a
+  // host tensor has no device slot type.
+  static bool touchesSystemMemory(Operation *op) {
+    auto onHost = [](mlir::Type type) {
+      auto tensorType = mlir::dyn_cast<RankedTensorType>(type);
+      if (!tensorType) {
+        return false;
+      }
+      auto layout =
+          mlir::dyn_cast_if_present<TTNNLayoutAttr>(tensorType.getEncoding());
+      return layout && layout.getBufferType() == BufferType::SystemMemory;
+    };
+    return llvm::any_of(op->getOperandTypes(), onHost) ||
+           llvm::any_of(op->getResultTypes(), onHost);
+  }
+
   std::uint64_t getUniqueTraceFuncIndex() {
     static std::atomic<std::uint64_t> traceFunctionIndex = 0;
     return traceFunctionIndex.fetch_add(1, std::memory_order_relaxed);
@@ -1010,6 +1030,20 @@ private:
           lastHoistable = i;
           break;
         }
+      }
+
+      // Leave the host transfers at either end of the function outside the
+      // trace (see touchesSystemMemory). Only the ends are trimmed: one in
+      // the middle is handled, or refused, as before.
+      while (firstHoistable < lastHoistable &&
+             (!shouldHoistOp(allOps[firstHoistable]) ||
+              touchesSystemMemory(allOps[firstHoistable]))) {
+        firstHoistable++;
+      }
+      while (lastHoistable > firstHoistable &&
+             (!shouldHoistOp(allOps[lastHoistable]) ||
+              touchesSystemMemory(allOps[lastHoistable]))) {
+        lastHoistable--;
       }
 
       // Collect all hoistable ops between first and last. Creation ops (e.g.
