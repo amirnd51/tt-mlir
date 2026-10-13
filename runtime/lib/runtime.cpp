@@ -1059,6 +1059,22 @@ void memcpy(Tensor dst, Tensor src) {
       [&]() -> RetType { ::tt::runtime::distributed::memcpy(dst, src); });
 }
 
+Tensor toHostLayoutOf(Tensor host, Tensor like) {
+  using RetType = Tensor;
+  return DISPATCH_TO_CURRENT_RUNTIME(
+      RetType,
+      [&]() -> RetType {
+        return ::tt::runtime::ttnn::toHostLayoutOf(host, like);
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("toHostLayoutOf", DeviceRuntime::TTMetal);
+      },
+      [&]() -> RetType {
+        detail::fatalNotImplemented("toHostLayoutOf",
+                                    HostRuntime::Distributed);
+      });
+}
+
 void deallocateTensor(Tensor &tensor, bool force) {
   using RetType = void;
   DISPATCH_TO_CURRENT_RUNTIME(

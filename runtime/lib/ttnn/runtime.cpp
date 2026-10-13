@@ -1075,6 +1075,25 @@ void memcpy(::tt::runtime::Tensor dst, ::tt::runtime::Tensor src) {
   }
 }
 
+::tt::runtime::Tensor toHostLayoutOf(::tt::runtime::Tensor host,
+                                     ::tt::runtime::Tensor like) {
+  const ::ttnn::Tensor &hostTensor =
+      utils::getTTNNTensorFromRuntimeTensor(host);
+  const ::ttnn::Tensor &likeTensor =
+      utils::getTTNNTensorFromRuntimeTensor(like);
+  LOG_ASSERT(utils::isOnHost(hostTensor.storage_type()),
+             "toHostLayoutOf: the source must be a host tensor");
+  LOG_ASSERT(hostTensor.dtype() == likeTensor.dtype(),
+             "toHostLayoutOf: the element types differ");
+  ::ttnn::Tensor out = hostTensor;
+  if (out.layout() != likeTensor.layout()) {
+    out = ::ttnn::to_layout(out, likeTensor.layout(), std::nullopt,
+                            std::nullopt);
+  }
+  return utils::createRuntimeTensorFromTTNN(out, /*meshEvent=*/std::nullopt,
+                                            /*retain=*/true);
+}
+
 void deallocateTensor(::tt::runtime::Tensor &tensor, bool force) {
   // If the tensor is retained, do not deallocate
   if (getTensorRetain(tensor)) {

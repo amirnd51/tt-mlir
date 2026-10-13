@@ -257,6 +257,9 @@ void memcpy(void *dst, ::tt::runtime::Tensor src,
 
 void memcpy(::tt::runtime::Tensor dst, ::tt::runtime::Tensor src);
 
+::tt::runtime::Tensor toHostLayoutOf(::tt::runtime::Tensor host,
+                                     ::tt::runtime::Tensor like);
+
 void deallocateTensor(::tt::runtime::Tensor &tensor, bool force = false);
 
 std::string getOpDebugString(OpContext opContextHandle);

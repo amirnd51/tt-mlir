@@ -239,6 +239,12 @@ void memcpy(void *dst, Tensor src,
 
 void memcpy(Tensor dst, Tensor src);
 
+// A host tensor holding `host`'s values in the layout of the device tensor
+// `like` (tilized and padded as `like` is), converted on the host: what
+// memcpy(like, .) takes, with no device tensor made on the way. The element
+// types must already agree.
+Tensor toHostLayoutOf(Tensor host, Tensor like);
+
 // Deallocates tensor, both device and host. Cannot deallocate host tensors with
 // borrowed storage.
 void deallocateTensor(Tensor &tensor, bool force = false);
