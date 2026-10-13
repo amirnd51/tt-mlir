@@ -770,3 +770,23 @@ byte-different artifacts and identical output to five decimals.
 
 The `.patch` files stay on disk as the historical record. Nothing in
 `deferred-on-bump/` is an open action any more.
+
+### 45 — a host tensor in a device tensor's layout, made on the host (2026-10-13)
+
+`45-runtime-to-host-layout-of-2026-10-13.patch` —
+`runtime/include/tt/runtime/runtime.h`, `runtime/lib/runtime.cpp`,
+`runtime/lib/ttnn/runtime.cpp`, `runtime/include/tt/runtime/detail/ttnn/ttnn.h`
+
+`tt::runtime::memcpy(deviceTensor, hostTensor)` writes a resident tensor in
+place and takes host bytes already in that tensor's layout. The runtime
+offered that layout only through the device: `toLayout` to a temporary
+device tensor, then `toHost(untilize=false)`. `toHostLayoutOf(host, like)`
+tilizes on the host. TTNN only; the element types must already agree. One
+commit (`ac606447e`).
+
+Seen from MOLA on eight Wormhole chips (`libmola_tt_serve`
+`mola_tt_write`): the serving engine writes five resident inputs a token
+(the embedding row, cos, sin, the mask, the position). Each went host to
+chips, chips to host, host to chips: 2.7 ms a write. Direct: 0.38 ms
+(MOLA `progress/tt-wormhole-bringup.md`, 2026-10-13).
+

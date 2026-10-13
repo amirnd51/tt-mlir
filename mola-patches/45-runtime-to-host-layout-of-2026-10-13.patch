@@ -1,0 +1,108 @@
+From ac606447e6806fa75d7fb5b0504937c1d9f79948 Mon Sep 17 00:00:00 2001
+From: Amir Nassereldine <46420889+amirnd51@users.noreply.github.com>
+Date: Tue, 13 Oct 2026 02:58:03 +0000
+Subject: [PATCH] runtime: toHostLayoutOf, a host tensor laid out as a device
+ tensor is (TTNN)
+
+memcpy(deviceTensor, hostTensor) takes host bytes already in the device
+tensor's layout; the only way to that layout was through the device
+(toLayout to a temporary, toHost without untilize). toHostLayoutOf makes it
+on the host. TTNN only; the element types must agree.
+---
+ runtime/include/tt/runtime/detail/ttnn/ttnn.h |  3 +++
+ runtime/include/tt/runtime/runtime.h          |  6 ++++++
+ runtime/lib/runtime.cpp                       | 16 ++++++++++++++++
+ runtime/lib/ttnn/runtime.cpp                  | 19 +++++++++++++++++++
+ 4 files changed, 44 insertions(+)
+
+diff --git a/runtime/include/tt/runtime/detail/ttnn/ttnn.h b/runtime/include/tt/runtime/detail/ttnn/ttnn.h
+index 9314cb0a8..53ba870af 100644
+--- a/runtime/include/tt/runtime/detail/ttnn/ttnn.h
++++ b/runtime/include/tt/runtime/detail/ttnn/ttnn.h
+@@ -257,6 +257,9 @@ void memcpy(void *dst, ::tt::runtime::Tensor src,
+ 
+ void memcpy(::tt::runtime::Tensor dst, ::tt::runtime::Tensor src);
+ 
++::tt::runtime::Tensor toHostLayoutOf(::tt::runtime::Tensor host,
++                                     ::tt::runtime::Tensor like);
++
+ void deallocateTensor(::tt::runtime::Tensor &tensor, bool force = false);
+ 
+ std::string getOpDebugString(OpContext opContextHandle);
+diff --git a/runtime/include/tt/runtime/runtime.h b/runtime/include/tt/runtime/runtime.h
+index 109af67a3..a1263666b 100644
+--- a/runtime/include/tt/runtime/runtime.h
++++ b/runtime/include/tt/runtime/runtime.h
+@@ -239,6 +239,12 @@ void memcpy(void *dst, Tensor src,
+ 
+ void memcpy(Tensor dst, Tensor src);
+ 
++// A host tensor holding `host`'s values in the layout of the device tensor
++// `like` (tilized and padded as `like` is), converted on the host: what
++// memcpy(like, .) takes, with no device tensor made on the way. The element
++// types must already agree.
++Tensor toHostLayoutOf(Tensor host, Tensor like);
++
+ // Deallocates tensor, both device and host. Cannot deallocate host tensors with
+ // borrowed storage.
+ void deallocateTensor(Tensor &tensor, bool force = false);
+diff --git a/runtime/lib/runtime.cpp b/runtime/lib/runtime.cpp
+index f15f5f92b..72d98f043 100644
+--- a/runtime/lib/runtime.cpp
++++ b/runtime/lib/runtime.cpp
+@@ -1059,6 +1059,22 @@ void memcpy(Tensor dst, Tensor src) {
+       [&]() -> RetType { ::tt::runtime::distributed::memcpy(dst, src); });
+ }
+ 
++Tensor toHostLayoutOf(Tensor host, Tensor like) {
++  using RetType = Tensor;
++  return DISPATCH_TO_CURRENT_RUNTIME(
++      RetType,
++      [&]() -> RetType {
++        return ::tt::runtime::ttnn::toHostLayoutOf(host, like);
++      },
++      [&]() -> RetType {
++        detail::fatalNotImplemented("toHostLayoutOf", DeviceRuntime::TTMetal);
++      },
++      [&]() -> RetType {
++        detail::fatalNotImplemented("toHostLayoutOf",
++                                    HostRuntime::Distributed);
++      });
++}
++
+ void deallocateTensor(Tensor &tensor, bool force) {
+   using RetType = void;
+   DISPATCH_TO_CURRENT_RUNTIME(
+diff --git a/runtime/lib/ttnn/runtime.cpp b/runtime/lib/ttnn/runtime.cpp
+index cd6c754f8..565e150eb 100644
+--- a/runtime/lib/ttnn/runtime.cpp
++++ b/runtime/lib/ttnn/runtime.cpp
+@@ -1075,6 +1075,25 @@ void memcpy(::tt::runtime::Tensor dst, ::tt::runtime::Tensor src) {
+   }
+ }
+ 
++::tt::runtime::Tensor toHostLayoutOf(::tt::runtime::Tensor host,
++                                     ::tt::runtime::Tensor like) {
++  const ::ttnn::Tensor &hostTensor =
++      utils::getTTNNTensorFromRuntimeTensor(host);
++  const ::ttnn::Tensor &likeTensor =
++      utils::getTTNNTensorFromRuntimeTensor(like);
++  LOG_ASSERT(utils::isOnHost(hostTensor.storage_type()),
++             "toHostLayoutOf: the source must be a host tensor");
++  LOG_ASSERT(hostTensor.dtype() == likeTensor.dtype(),
++             "toHostLayoutOf: the element types differ");
++  ::ttnn::Tensor out = hostTensor;
++  if (out.layout() != likeTensor.layout()) {
++    out = ::ttnn::to_layout(out, likeTensor.layout(), std::nullopt,
++                            std::nullopt);
++  }
++  return utils::createRuntimeTensorFromTTNN(out, /*meshEvent=*/std::nullopt,
++                                            /*retain=*/true);
++}
++
+ void deallocateTensor(::tt::runtime::Tensor &tensor, bool force) {
+   // If the tensor is retained, do not deallocate
+   if (getTensorRetain(tensor)) {
+-- 
+2.34.1
+
