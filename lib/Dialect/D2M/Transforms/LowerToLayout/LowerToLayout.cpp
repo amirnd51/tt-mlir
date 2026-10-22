@@ -352,7 +352,7 @@ public:
           RankedTensorType::get(toTy.getShape(), toTy.getElementType(), enc);
       auto view = rewriter.create<ViewLayoutOp>(loc, resultTy, fromVal, map,
                                                 /*reinterpretLayout=*/false);
-      // MOLA (#1726): a view onto a LARGER device shape (the grid-padded
+      // Tutticore (#1726): a view onto a LARGER device shape (the grid-padded
       // relayout, dim_alignments 32x32 -> 32x416: 14 tiles viewed as 26).
       // The shared logical-space map is the identity past the source's
       // extent, so the view indexes OUTSIDE its source there; those indices

@@ -1,7 +1,7 @@
 // RUN: ttmlir-opt --ttcore-register-device --ttir-to-d2m -o %t %s
 // RUN: FileCheck %s --input-file=%t
 //
-// MOLA local patch 33: a reshape that re-partitions the innermost dimension
+// Tutticore local patch 33: a reshape that re-partitions the innermost dimension
 // into or out of an extent that is not a multiple of the tile width is
 // miscompiled when its operand lives in DRAM (the view's addresses are correct
 // in every inspectable layer; resolving them against a DRAM-sharded buffer

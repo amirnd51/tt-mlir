@@ -1217,7 +1217,7 @@ mlir::LogicalResult d2m::ViewLayoutOp::bufferize(
   auto newOp = rewriter.create<d2m::ViewLayoutOp>(getLoc(), outMemrefType,
                                                   *maybeInput, getRemapping(),
                                                   getReinterpretLayout());
-  // (MOLA #1726: a mark LowerToLayout set, d2m.view_pads, stays on the view)
+  // (Tutticore #1726: a mark LowerToLayout set, d2m.view_pads, stays on the view)
   newOp->setDiscardableAttrs(getOperation()->getDiscardableAttrDictionary());
 
   mlir::bufferization::replaceOpWithBufferizedValues(rewriter, *this,
@@ -2822,7 +2822,7 @@ FailureOr<d2m::ParallelizedGeneric> d2m::GenericOp::withParallelization(
         return failure();
       }
       auto operandType = mlir::cast<ShapedType>(operand.get().getType());
-      // (MOLA) Ask before reblocking. reblockShapedType asserts that each new
+      // (Tutticore) Ask before reblocking. reblockShapedType asserts that each new
       // grid dimension divides the operand's tile count exactly -- a ShapedType
       // carries one shard shape for every core and cannot express an uneven
       // split -- and that assert ABORTS the process.

@@ -1065,7 +1065,7 @@ std::vector<Tensor> submit(Device deviceHandle, Binary executableHandle,
     // Cache one submesh per (parent, shape): create_submesh registers the
     // child in the parent, so creating one per submit() accumulates a submesh
     // per dispatch — after ~8 in-process re-dispatches the device hard-stalls
-    // (MOLA G3 re-dispatch bug).
+    // (Tutticore G3 re-dispatch bug).
     static std::map<std::tuple<int, int64_t, int64_t>,
                     std::shared_ptr<tt_metal::distributed::MeshDevice>>
         submeshCache;

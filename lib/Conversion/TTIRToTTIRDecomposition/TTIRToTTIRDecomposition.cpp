@@ -303,18 +303,18 @@ struct DotGeneralToMatmulConversionPattern
           lhsMatmulInput, rhsMatmulInput);
     }
 
-    // REALIZATION: carry MOLA's placement intent (mola.lhs_l1 etc., set by
-    // mola::molaPlaceTTActivations on the pre-decomposition dot_general) onto the
-    // matmul this op lowers to, so resolveMolaMemSpace honors MOLA's L1 decision.
-    // The decision is MOLA's; the backend just preserves+realizes it.
+    // REALIZATION: carry Tutticore's placement intent (tutticore.lhs_l1 etc., set by
+    // tutticore::tutticorePlaceTTActivations on the pre-decomposition dot_general) onto the
+    // matmul this op lowers to, so resolveTutticoreMemSpace honors Tutticore's L1 decision.
+    // The decision is Tutticore's; the backend just preserves+realizes it.
     // Re-ported 2026-08-24: upstream refactored this to build EITHER a
     // MultiplyOp or a MatmulOp into the `contractionResult` Value, so the old
     // `matmulOp` handle no longer exists. Tag whichever op actually defines the
-    // contraction -- the intent is "carry mola.* onto the op this lowers to",
+    // contraction -- the intent is "carry tutticore.* onto the op this lowers to",
     // which is the defining op in both branches.
     if (mlir::Operation *contractionOp = contractionResult.getDefiningOp()) {
       for (mlir::NamedAttribute na : op->getAttrs()) {
-        if (na.getName().strref().starts_with("mola.")) {
+        if (na.getName().strref().starts_with("tutticore.")) {
           contractionOp->setAttr(na.getName(), na.getValue());
         }
       }

@@ -142,7 +142,7 @@ private:
       results;
   llvm::SmallVector<int64_t> deviceGridShape;
   bool ttnnMode;
-  // (MOLA) Double-buffered shard budget, in bytes, for an input operand along
+  // (Tutticore) Double-buffered shard budget, in bytes, for an input operand along
   // a reduction axis; nullopt streams the axis one virtual core per block as
   // upstream does. See clampReductionSplit in GridAnalysis.cpp.
   std::optional<uint64_t> reductionShardBudgetBytes;

@@ -245,7 +245,7 @@ bool shouldImplementAsVirtualGrid(mlir::RankedTensorType tensorType,
   // VGM-compatible — the VGM maps only the materialized grid dimensions while
   // the layout keeps the logical-to-physical collapse.
   //
-  // MOLA local patch (2026-06-03): leading UNIT dims (a degenerate batch=1,
+  // Tutticore local patch (2026-06-03): leading UNIT dims (a degenerate batch=1,
   // e.g. a batched dot_general traced from torch) don't make a tensor
   // meaningfully >2D — sharding only happens on the last two dims, and
   // computeOptimalBlockShardedGrid already handles rank>2 by sharding the

@@ -63,7 +63,7 @@ void createStableHLOToTTIRPipeline(
     pm.addPass(createConvertArithToStableHLOPass());
   }
   if (options.enableAggressiveSimplification) {
-    // MOLA F3 (2026-05-12, re-ported 2026-08-24): this stablehlo pass is
+    // Tutticore F3 (2026-05-12, re-ported 2026-08-24): this stablehlo pass is
     // anchored on `func.func`. Upstream adds it straight to a module-scoped pm,
     // which aborts under parsePassPipeline (it forces Nesting::Explicit).
     pm.nest<mlir::func::FuncOp>().addPass(

@@ -244,7 +244,7 @@ modifyDeviceType(MLIRContext *ctx, RankedTensorType baseType,
     }
   }
 
-  // MOLA local patch (2026-06-07, re-authors dropped patch 03): an L1
+  // Tutticore local patch (2026-06-07, re-authors dropped patch 03): an L1
   // buffer must be memory_layout=Sharded — Interleaved is only legal for
   // DRAM. Propagating the base (e.g. DRAM-Interleaved) layout verbatim onto
   // an L1 staging buffer produced silently-wrong reads in consuming

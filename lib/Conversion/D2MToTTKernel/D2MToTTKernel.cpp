@@ -2769,7 +2769,7 @@ public:
 
     Value nocId = materializeKernelNocId(rewriter, op.getOperation());
 
-    // MOLA (#1726): padding of a view read outside its source
+    // Tutticore (#1726): padding of a view read outside its source
     // (LowerDMAToFullyIndexedForm's d2m.zero_fill). The destination is filled
     // from this core's MEM_ZEROS region, which the firmware zeroes at start
     // (tt-metal brisc.cc wzeromem(MEM_ZEROS_BASE, MEM_ZEROS_SIZE)); it is

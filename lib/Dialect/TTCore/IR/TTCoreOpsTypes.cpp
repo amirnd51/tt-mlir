@@ -959,7 +959,7 @@ llvm::SmallVector<int64_t>
 MetalLayoutAttr::getDeviceShape(ArrayRef<int64_t> gridShape,
                                 ArrayRef<int64_t> tileShape) const {
   llvm::SmallVector<int64_t> physicalShape = getPhysicalShape(tileShape);
-  // MOLA local patch (2026-05-05, patch 10): pad gridShape with 1s
+  // Tutticore local patch (2026-05-05, patch 10): pad gridShape with 1s
   // to match physicalShape's rank. Higher-rank tensors (e.g. Llama's
   // 4D-6D activations after tile expansion) iterate physicalShape
   // beyond the device's mesh-grid rank (typically 2D); without

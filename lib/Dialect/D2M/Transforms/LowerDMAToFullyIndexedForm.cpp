@@ -408,7 +408,7 @@ static Value generateDMAWithCoalescing(OpBuilder &builder, Location loc,
   return loopNest.results.front();
 }
 
-// MOLA (#1726): a DMA read through a view that maps part of its iteration
+// Tutticore (#1726): a DMA read through a view that maps part of its iteration
 // space OUTSIDE its source memref's shape. A padding relayout lowered through
 // shared logical space (LowerToLayout's buildLayoutTransformMap) does this:
 // the padded tiles of the view have no source tile, and the source's memory
@@ -556,7 +556,7 @@ public:
 
     SmallVector<Value> gridIndices(op.getSrcIndices());
 
-    // (MOLA #1726: a view that reads outside its source)
+    // (Tutticore #1726: a view that reads outside its source)
     AffineMap viewMap;
     SmallVector<int64_t> sourceShape;
     bool guardSource = false;
