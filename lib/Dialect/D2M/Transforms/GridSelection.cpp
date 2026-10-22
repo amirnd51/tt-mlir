@@ -99,7 +99,7 @@ static void recordGenericConsumer(Operation *user,
   }
 
   if (!useGeneric) {
-    // (MOLA diagnostic) name the op that violates the invariant -- the bare
+    // (Tutticore diagnostic) name the op that violates the invariant -- the bare
     // assertion says only that one exists, which is not enough to fix it.
     llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
                  << user->getName().getStringRef() << "'\n  consumer : " << *user
@@ -220,7 +220,7 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
   RankedTensorType newTensorType = utils::tensorWithOptimalGrid(
       outputType, ttnnMode, optimalGrid, paddingTileShape);
 
-  // (MOLA) Decline a grid this tensor cannot be reblocked back from.
+  // (Tutticore) Decline a grid this tensor cannot be reblocked back from.
   //
   // Below, the optimal-grid tensor is reblocked to the ORIGINAL grid to keep the
   // view chain well formed. reblockShapedType asserts that each new grid
@@ -328,7 +328,7 @@ static void insertViewForTTNNDRAMTensor(Value operand,
   AffineMap reblockMap = ttmlir::utils::calculateReblockMap(
       unShardedShapeWithGrid, fakeShardedShape, builder.getContext());
 
-  // MOLA local patch (2026-06-07): Interleaved is only correct for the
+  // Tutticore local patch (2026-06-07): Interleaved is only correct for the
   // single-core (1x1) distribution. For a multicore optimalGrid the view
   // output must be Sharded so address derivation goes through the
   // ShardLayout/coreVirtMap path (proven exact for arg-fed DRAM-sharded at
@@ -368,7 +368,7 @@ optimizeTTNNMetalLayoutCastOpGrid(ttir::TTNNMetalLayoutCastOp castOp,
     return;
   }
 
-  // (MOLA) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
+  // (Tutticore) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
   // an inexact split and that assert aborts the compiler. Decline rather than
   // die; the op keeps the grid it already has.
   if (!utils::canReblockShapedType(outputType, optimalGrid)) {
@@ -1025,7 +1025,7 @@ public:
       return;
       }
 
-    // MOLA local patch (2026-06-07): cross-generic producer/consumer grid
+    // Tutticore local patch (2026-06-07): cross-generic producer/consumer grid
     // harmonization. Each generic's grids are anchored on its own output,
     // so a single-use staging producer (constant fill, get_global tilize)
     // can land on a different grid than its consumer's operand — the same

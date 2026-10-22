@@ -20,7 +20,7 @@ get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
 get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
 get_property(translation_libs GLOBAL PROPERTY MLIR_TRANSLATION_LIBS)
 
-# MOLA local patch (2026-05-11): split MLIR libs from tt-mlir's own
+# Tutticore local patch (2026-05-11): split MLIR libs from tt-mlir's own
 # libs. When MLIR_LINK_MLIR_DYLIB=ON, MLIR libs link via libMLIR.so
 # (single shared MLIR in the process). Only tt-mlir's own static libs
 # get --whole-archive'd into libTTMLIRCompiler.so. Without this split,
@@ -152,7 +152,7 @@ else()
 endif()
 
 target_link_libraries(TTMLIRCompiler PRIVATE
-    # MOLA F3 path C (2026-05-11): force libMLIR.so + libLLVM.so to be
+    # Tutticore F3 path C (2026-05-11): force libMLIR.so + libLLVM.so to be
     # processed BEFORE any MLIR/LLVM static archive in the link line.
     # Otherwise the linker walks .a files first; their TUs (e.g.
     # LLVMCodeGen's "enable-branch-hint" cl::opt, MLIR SparseTensor's

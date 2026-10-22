@@ -305,7 +305,7 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
 
   // Build OUTPUT device → logical map.
   // OUTPUT device → OUTPUT physical.
-  // MOLA local patch (2026-06-07): pad a short grid (leading unit dims) and
+  // Tutticore local patch (2026-06-07): pad a short grid (leading unit dims) and
   // prepend an expansion so the composed map's input dims match the
   // tensor's TRUE device rank (see the input-side patch below).
   size_t toPad = toPhysicalShape.size() > toGridShape.size()
@@ -354,7 +354,7 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
 
   // INPUT physical → INPUT device.
   //
-  // MOLA local patch (2026-06-07): a tensor whose grid rank is lower than
+  // Tutticore local patch (2026-06-07): a tensor whose grid rank is lower than
   // its physical rank (leading size-1 dims dropped from the grid, e.g.
   // Llama's batched attention tensors materialized with a 2D grid against a
   // 3D physical shape) used to assert in buildPhysicalToDeviceMap. Build

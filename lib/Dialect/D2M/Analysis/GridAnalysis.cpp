@@ -377,7 +377,7 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
   return inputInfos;
 }
 
-// (MOLA, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
+// (Tutticore, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
 // whose double-buffered shard fits the budget, not the most.
 //
 // A reduction axis is not parallel work: splitting it into virtual cores only
@@ -386,12 +386,12 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
 // through the unpacker, which holds an f32 tile as Tf32 -- 13 mantissa bits
 // truncated on every reload. Streamed one tile per block, a 768-wide f32 sum
 // came out 0.47% low on Blackhole and a sum of exact ones exact; the same
-// sum inside one block is exact (MOLA experiments/tt/probes/normbias/,
+// sum inside one block is exact (Tutticore experiments/tt/probes/normbias/,
 // reduce_sum_uniform_768 / reduce_sum_ones_768). That truncation is the
 // LayerNorm-low / RMSNorm-high magnitude error of the whole model corpus.
 //
 // Only input operands and only tiled ones are touched; the split must still
-// map onto a legal physical grid. MOLA_TT_D2M_REDUCTION_SPLIT=stream restores
+// map onto a legal physical grid. TUTTICORE_TT_D2M_REDUCTION_SPLIT=stream restores
 // the upstream choice for an A/B.
 // `budgetGrid` is the grid the shard is budgeted against: the operand's own
 // grid with every dim the output also indexes replaced by the output's grid
@@ -737,7 +737,7 @@ GridAnalysis::GridAnalysis(Operation *moduleOp,
     : deviceGridShape(deviceGridShape), ttnnMode(ttnnMode) {
   // A third of usable L1 for one operand's double-buffered reduction shard:
   // the input stream, its scaler and the output must still all fit.
-  const char *reductionSplit = std::getenv("MOLA_TT_D2M_REDUCTION_SPLIT");
+  const char *reductionSplit = std::getenv("TUTTICORE_TT_D2M_REDUCTION_SPLIT");
   if (!(reductionSplit && llvm::StringRef(reductionSplit) == "stream")) {
     if (ttcore::SystemDescAttr systemDesc =
             ttcore::getCurrentScopeSystemDesc(moduleOp)) {

@@ -108,11 +108,11 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
 endif()
 
 add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR}
-  # MOLA local patch (2026-05-11): MOLA's bundled LLVM (sha 8f264586d752,
+  # Tutticore local patch (2026-05-11): Tutticore's bundled LLVM (sha 8f264586d752,
   # Dec 12 2025) marks OpBuilder::create<OpTy> deprecated in favor of
   # OpTy::create. tt-mlir source still uses the old form throughout;
   # silence the warning so -Werror doesn't fail the build when linking
-  # against MOLA's LLVM.
+  # against Tutticore's LLVM.
   -Wno-deprecated-declarations)
 
 set(CMAKE_LINKER_TYPE DEFAULT)
@@ -171,9 +171,9 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
 include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
 include_directories(${TTMLIR_SOURCE_DIR}/include)
 include_directories(${TTMLIR_BINARY_DIR}/include)
-# MOLA local patch (2026-05-11): mark toolchain include dir as SYSTEM
+# Tutticore local patch (2026-05-11): mark toolchain include dir as SYSTEM
 # so it's searched AFTER MLIR_INCLUDE_DIRS. When MLIR_DIR points at a
-# different LLVM install (e.g. /home/amirnass/projects/mola/build/llvm-install)
+# different LLVM install (e.g. /home/amirnass/projects/tutticore/build/llvm-install)
 # than the toolchain, the toolchain headers (at a different LLVM sha)
 # must NOT shadow the MLIR install's headers — otherwise we get header
 # vs lib mismatches like "no viable conversion from RegionBranchPoint
@@ -186,9 +186,9 @@ include(TTMLIRPythonSitePackages)
 add_subdirectory(third_party)
 if (TTMLIR_ENABLE_STABLEHLO)
   set(STABLEHLO_BUILD_EMBEDDED ON)
-  # MOLA F3 (2026-05-12), REVISED 2026-08-24: this used to force OFF because
-  # MOLA's build/llvm-install had no MLIR_ENABLE_BINDINGS_PYTHON, so
-  # MLIRPythonSources / MLIRPythonExtension did not exist. MOLA commit 7629a61
+  # Tutticore F3 (2026-05-12), REVISED 2026-08-24: this used to force OFF because
+  # Tutticore's build/llvm-install had no MLIR_ENABLE_BINDINGS_PYTHON, so
+  # MLIRPythonSources / MLIRPythonExtension did not exist. Tutticore commit 7629a61
   # turned those bindings ON (upstream stablehlo's
   # mlir_configure_python_dev_packages needs them), so the guard is now not only
   # unnecessary but harmful: with it OFF, stablehlo never defines
@@ -201,7 +201,7 @@ if (TTMLIR_ENABLE_STABLEHLO)
   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/shardy)
   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/stablehlo)
   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo)
-  # MOLA F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
+  # Tutticore F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
   # add_compile_options BEFORE the add_subdirectory call. Newer LLVM/MLIR
   # TableGen emits unqualified `TokenType` references in each stablehlo
   # *.cpp.inc verifier predicate (StablehloOps.cpp.inc, InterpreterOps.cpp.

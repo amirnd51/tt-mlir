@@ -48,7 +48,7 @@ inline bool isReductionScalerBuffer(Operation *op) {
 // a hard precondition: violating it aborts the process, so a caller that cannot
 // guarantee divisibility must ask FIRST rather than try and recover.
 //
-// (MOLA) Added because the precondition was in fact reachable from grid
+// (Tutticore) Added because the precondition was in fact reachable from grid
 // selection: the divisor is chosen against one shape, and by the time reblocking
 // runs the shape has been through interval collapse and alignment, so the
 // divisor need not still divide. See the guarded call sites in

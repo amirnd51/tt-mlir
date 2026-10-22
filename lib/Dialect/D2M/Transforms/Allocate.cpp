@@ -574,7 +574,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
 
         Operation *firstOp = li->getStartOperation(result);
         Operation *lastOp = li->getEndOperation(result, firstOp);
-        // MOLA local patch (2026-06-08, ROOT-CAUSED, now DEFAULT-ON): top-level
+        // Tutticore local patch (2026-06-08, ROOT-CAUSED, now DEFAULT-ON): top-level
         // staged-buffer ADDRESS REUSE corrupts re-dispatch (decode). A parallel
         // matmul's output buffer (e.g. g in g*u) is reused/clobbered by the
         // sibling (u) when buffer pressure forces address recycling, so on the
@@ -585,9 +585,9 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
         // mostly DRAM (plentiful) so it does NOT pressure L1. Result: the full
         // dim=2048 Llama block decodes bf16-exact on EVERY dispatch (0.99990
         // x5; vs ~0 corrupt before) — single forward pass unaffected.
-        // MOLA_TT_ALLOC_REUSE=1 restores upstream reuse (single-dispatch only).
+        // TUTTICORE_TT_ALLOC_REUSE=1 restores upstream reuse (single-dispatch only).
         static const bool noReuse = [] {
-          const char *e = ::getenv("MOLA_TT_ALLOC_REUSE");
+          const char *e = ::getenv("TUTTICORE_TT_ALLOC_REUSE");
           return !(e && e[0] == '1');
         }();
         if (noReuse) {
@@ -615,7 +615,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
       closure.live.last = i->second;
     }
 
-    // MOLA local patch 40 (2026-09-06): visit the graph in program order, not
+    // Tutticore local patch 40 (2026-09-06): visit the graph in program order, not
     // in DenseMap order. The loop below inserts every alloc into
     // `analysis.memrefs`, a MapVector, so the allocator's whole packing order
     // followed the hash of Operation pointers and therefore the process's
@@ -676,7 +676,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
 
     TT_ALLOC_DEBUG("collected {} memref context(s)", analysis.memrefs.size());
 
-    // MOLA local patch 40 (2026-09-06): the order in which the planner sees
+    // Tutticore local patch 40 (2026-09-06): the order in which the planner sees
     // these contexts is its packing tie-break, and the packing result depends
     // on it. Upstream left it to DenseMap iteration, i.e. to the hash of
     // Operation pointers, so the same bloom-560m input reported a required
@@ -684,11 +684,11 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     // (with ASLR off, always the former), and the model fitted or fell back
     // depending on the run. The default here is L1 size descending with
     // program order for ties (first-fit-decreasing), which fits bloom where
-    // plain program order does not. MOLA_TT_D2M_ALLOC_ORDER selects another
+    // plain program order does not. TUTTICORE_TT_D2M_ALLOC_ORDER selects another
     // deterministic policy for an A/B: program, reverse, size, last (last use
     // descending), span (live range length descending).
     {
-      const char *policy = ::getenv("MOLA_TT_D2M_ALLOC_ORDER");
+      const char *policy = ::getenv("TUTTICORE_TT_D2M_ALLOC_ORDER");
       llvm::StringRef pol = (policy && policy[0]) ? policy : "size";
       llvm::SmallVector<std::pair<mlir::Value, MemrefValueContext>> entries(
           analysis.memrefs.begin(), analysis.memrefs.end());
@@ -740,7 +740,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     Block &funcBody = funcOp.getBody().front();
     const auto &L1memInfo = memSpaces[ordinal(MemorySpace::DeviceL1)];
 
-    // MOLA local patch (2026-06-08, #126): per-function auto-decision for
+    // Tutticore local patch (2026-06-08, #126): per-function auto-decision for
     // disjoint combiner CBs. The iters>=2 in-process re-dispatch corruption is
     // caused by data-INDEPENDENT combiner generics (matmul/mul/add with >=2
     // inputs) reusing the same per-core CB-scratch L1 addresses; on re-dispatch
@@ -761,7 +761,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     //       grid<=39, and every component, grid<=8, want disjoint).
     // Single self-selecting policy: maximal CB isolation when it fits L1 and the
     // device is under-occupied (concurrency is real); windowed reuse when the
-    // grid is saturated (siblings serialize). Override with MOLA_TT_CB_
+    // grid is saturated (siblings serialize). Override with TUTTICORE_TT_CB_
     // COMBINER_DISJOINT (0=force off, 1=force on); default = auto.
     auto alignedAllocBytes = [&](memref::AllocOp allocOp,
                                  int32_t numBuffers) -> AllocSizeT {
@@ -802,10 +802,10 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     });
     const AllocSizeT l1Capacity = L1memInfo.maxAddress - L1memInfo.baseAddress;
     // Fraction of L1 the disjoint combiner set may occupy, leaving room for the
-    // non-combiner working set + staging. Tunable via MOLA_TT_CB_DISJOINT_FRAC
+    // non-combiner working set + staging. Tunable via TUTTICORE_TT_CB_DISJOINT_FRAC
     // (percent). Default 50%.
     const AllocSizeT disjointFracPct = [] {
-      const char *p = ::getenv("MOLA_TT_CB_DISJOINT_FRAC");
+      const char *p = ::getenv("TUTTICORE_TT_CB_DISJOINT_FRAC");
       return static_cast<AllocSizeT>(p ? atoi(p) : 50);
     }();
     // Max combiner GRID OCCUPANCY (Tensix cores spanned) for which whole-program
@@ -819,9 +819,9 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
     // isolates them — whole-program ranges then only disturb the dense layout.
     // Measured: components grid<=8, dim=256 block grid<=39 (both need disjoint);
     // dim=2048 block grid 65-91 (needs window-64). Threshold 48 splits them.
-    // Tunable via MOLA_TT_CB_DISJOINT_MAXGRID (default 48).
+    // Tunable via TUTTICORE_TT_CB_DISJOINT_MAXGRID (default 48).
     const int64_t disjointMaxGrid = [] {
-      const char *m = ::getenv("MOLA_TT_CB_DISJOINT_MAXGRID");
+      const char *m = ::getenv("TUTTICORE_TT_CB_DISJOINT_MAXGRID");
       return static_cast<int64_t>(m ? atoi(m) : 48);
     }();
     const SequenceT funcMaxPos =
@@ -831,7 +831,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
         combinerFootprint <= (l1Capacity * disjointFracPct) / 100 &&
         maxCombinerGridVol <= disjointMaxGrid;
     const bool combinerDisjoint = [&] {
-      const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
+      const char *e = ::getenv("TUTTICORE_TT_CB_COMBINER_DISJOINT");
       if (e && e[0] == '0') {
         return false;
       }
@@ -840,8 +840,8 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
       }
       return combinerDisjointAuto;
     }();
-    if (::getenv("MOLA_TT_DUMP_MAXPOS")) {
-      llvm::errs() << "MOLA CB: combinerFootprint=" << combinerFootprint
+    if (::getenv("TUTTICORE_TT_DUMP_MAXPOS")) {
+      llvm::errs() << "Tutticore CB: combinerFootprint=" << combinerFootprint
                    << " l1Capacity=" << l1Capacity << " maxPos=" << funcMaxPos
                    << " maxCombinerGrid=" << maxCombinerGridVol
                    << " auto=" << combinerDisjointAuto
@@ -870,7 +870,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               allocOp->getAttrOfType<IntegerAttr>("d2m.synchronized_buffer")
                   .getInt();
         } else if (allocOp->getAttr("d2m.blocking_map")) {
-          // (MOLA patch) Elementwise-fusion intermediate. GenericFusion tags the
+          // (Tutticore patch) Elementwise-fusion intermediate. GenericFusion tags the
           // producer->consumer handoff buffer inside a fused generic with
           // d2m.blocking_map (see GenericFusion.cpp: "intermediate buffers that
           // have no associated generic operand"); InsertScratchBuffers moves the
@@ -894,14 +894,14 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               addMemrefValueContext(rewriter, analysis, allocOp.getResult(),
                                     allocOp.getType(), device);
           ctx.live = {genericSeqPos, genericSeqPos};
-          // MOLA local patch (2026-06-07): CB scratch reuses identical L1
+          // Tutticore local patch (2026-06-07): CB scratch reuses identical L1
           // addresses across data-INDEPENDENT generics in the same program;
           // overlapping execution clobbers the protocol (multi-branch
           // matmuls). Default to whole-program CB live-ranges so each
-          // generic gets disjoint CBs. Opt out: MOLA_TT_CB_REUSE=1.
+          // generic gets disjoint CBs. Opt out: TUTTICORE_TT_CB_REUSE=1.
           {
             static const bool cbNoReuse = [] {
-              const char *e = ::getenv("MOLA_TT_CB_REUSE");
+              const char *e = ::getenv("TUTTICORE_TT_CB_REUSE");
               return !(e && e[0] == '1');
             }();
             if (cbNoReuse) {
@@ -909,7 +909,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               // sliding window covers data-independent fanout (parallel
               // branches dispatch adjacently) while letting far-apart
               // generics reuse. Window in sequence positions; default 64
-              // (~4 generics), MOLA_TT_CB_WINDOW overrides.
+              // (~4 generics), TUTTICORE_TT_CB_WINDOW overrides.
               //
               // Combiner-disjoint policy (see analyzeGenericRegionAllocs head):
               // non-combiners ALWAYS use the protective window (default 64) so
@@ -920,7 +920,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
               // fixture that fits L1 (all components) and falls back to windowed
               // reuse on the dim=2048 block (already decode-exact that way).
               static const SequenceT win = [] {
-                const char *w = ::getenv("MOLA_TT_CB_WINDOW");
+                const char *w = ::getenv("TUTTICORE_TT_CB_WINDOW");
                 return static_cast<SequenceT>(w ? atoi(w) : 64);
               }();
               SequenceT maxPos = static_cast<SequenceT>(

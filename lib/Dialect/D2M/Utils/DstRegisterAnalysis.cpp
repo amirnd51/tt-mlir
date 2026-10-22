@@ -43,7 +43,7 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
     // Float multiplies are SFPU ops (see TileMulOp::getOperandsLoadFromDstRegister
     // for the measured FPU ELWMUL precision loss); keep this in sync with it.
     if (mlir::isa<TileMulOp>(op)) {
-      const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+      const char *sfpuMulSwitch = std::getenv("TUTTICORE_TT_D2M_SFPU_MUL");
       const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
       // Broadcast operands included; see TileMulOp::getOperandsLoadFromDstRegister.
       const bool hasBcastOperand = false;

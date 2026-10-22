@@ -156,14 +156,14 @@ public:
         // input is held as Tf32, and a kernel mixing the two modes produced
         // NaN outputs. Upstream set Fp32 only for typecast kernels and only
         // on port 0; a Default read of an f32 input drops the low 13 mantissa
-        // bits (MOLA experiments/tt/probes/qwen/f32_identity_mul.py,
+        // bits (Tutticore experiments/tt/probes/qwen/f32_identity_mul.py,
         // 2026-09-05), and a two-input SFPU kernel needs both ports covered.
         std::vector<UnpackToDestMode> unpackModes(
             std::max<size_t>(1, cbOperandIndexToPort.size()),
             UnpackToDestMode::Default);
-        // MOLA_TT_D2M_FP32_UNPACK=0 restores upstream's typecast-only, port-0
+        // TUTTICORE_TT_D2M_FP32_UNPACK=0 restores upstream's typecast-only, port-0
         // rule for an A/B.
-        const char *fp32UnpackSwitch = std::getenv("MOLA_TT_D2M_FP32_UNPACK");
+        const char *fp32UnpackSwitch = std::getenv("TUTTICORE_TT_D2M_FP32_UNPACK");
         const bool fp32Unpack = !(fp32UnpackSwitch && fp32UnpackSwitch[0] == '0');
         if (fp32DestAccum && !fp32Unpack) {
           if (kernelContainsTypecast(thread.getKernelSymbol())) {
@@ -176,11 +176,11 @@ public:
               unpackModes[port] = UnpackToDestMode::Fp32;
             }
           }
-          // (MOLA, 2026-09-06) A relayout kernel (tilize / untilize and
+          // (Tutticore, 2026-09-06) A relayout kernel (tilize / untilize and
           // nothing else) moves an f32 tensor through the FPU datacopy path,
           // and srcA holds an f32 as Tf32: every f32 tensor D2M wrote back to
           // the host had its low 13 mantissa bits zero, while the same value
-          // through TTNN was exact (MOLA experiments/tt/probes/normbias/
+          // through TTNN was exact (Tutticore experiments/tt/probes/normbias/
           // f32_output_scale, 2026-09-06). TTIRToD2M brackets nearly every
           // op with such a pair, so each f32 intermediate lost 13 bits per
           // boundary. tilize_block and pack_untilize_block both take their

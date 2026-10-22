@@ -519,7 +519,7 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp) {
 }
 
 bool isPackerL1AccReduceOnlyLoop(Operation *loopOp) {
-  if (const char *sw = std::getenv("MOLA_TT_D2M_REDUCE_L1_ACC");
+  if (const char *sw = std::getenv("TUTTICORE_TT_D2M_REDUCE_L1_ACC");
       sw && sw[0] == '0' && sw[1] == '\0') {
     return false;
   }
@@ -1714,7 +1714,7 @@ buildIndices(PatternRewriter &rewriter, Location loc,
     }
   }
 
-  // (MOLA, 2026-09-06) The slice pitch is the footprint of the WHOLE
+  // (Tutticore, 2026-09-06) The slice pitch is the footprint of the WHOLE
   // compute nest, not of this operand's own dst dims. An operand whose
   // access map carries a constant index (a broadcast: `%cos[%i, 0, %k, %l]`
   // against `%q[%i, %j, %k, %l]` with j over two tiles) owns fewer dst dims

@@ -2334,15 +2334,15 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
   // Float multiplies run on the SFPU (both operands staged in DST), not the
   // FPU's ELWMUL: on Blackhole the FPU bf16 x bf16 product differs from the
   // round-to-nearest-even result on ~28% of elements (relative error up to
-  // 1e-2, measured 2026-09-05 on random operands, MOLA
+  // 1e-2, measured 2026-09-05 on random operands, Tutticore
   // experiments/tt/probes/qwen/bf16_mul.py) even with HiFi4 configured,
   // while the SFPU mul_binary_tile is exact -- which is also what TTNN's
   // binary_ng uses for bf16 multiply. Add/sub stay on the FPU: their FPU
   // results match TTNN's exactly. Must agree with classifyComputeOp in
   // Utils/DstRegisterAnalysis.cpp (DST capacity is sized by the same class).
-  // MOLA_TT_D2M_SFPU_MUL=0 restores the FPU multiply for an A/B; the
+  // TUTTICORE_TT_D2M_SFPU_MUL=0 restores the FPU multiply for an A/B; the
   // classifier in DstRegisterAnalysis.cpp reads the same switch.
-  const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
+  const char *sfpuMulSwitch = std::getenv("TUTTICORE_TT_D2M_SFPU_MUL");
   const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
   // Broadcast operands included (2026-09-06). Patch 34 kept a multiply with
   // a broadcast operand on the FPU because the SFPU path computed
@@ -2353,7 +2353,7 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
   // landing inside the other operand's slots. buildIndices now takes the
   // pitch from the whole compute nest, and that probe is bit-identical to
   // TTNN on the SFPU. The FPU broadcast product is 0.088% high on bf16
-  // (MOLA experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
+  // (Tutticore experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
   // float stays there.
   auto lhsType = getOperand(0).getType();
   if (sfpuMul && mlir::isa<mlir::tt::ttcore::TileType>(lhsType) &&

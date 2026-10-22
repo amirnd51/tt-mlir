@@ -163,7 +163,7 @@ bool needsFlattenAndSwap(llvm::ArrayRef<int64_t> inputShape,
          countTrailingOnes(inputShape) > 0;
 }
 
-// MOLA local patch 42 (2026-10-09): the trailing-1 status flips AND the
+// Tutticore local patch 42 (2026-10-09): the trailing-1 status flips AND the
 // non-1 dimensions are repartitioned in the same reshape, e.g.
 //   [16, 128] -> [2048, 1]        [1, 2048] -> [1, 16, 128, 1]
 //   [2048, 1] -> [16, 128]

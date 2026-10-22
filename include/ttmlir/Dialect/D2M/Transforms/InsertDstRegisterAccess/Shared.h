@@ -203,7 +203,7 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
 // across DST flips reloads its running sum from L1 through the unpacker on
 // every flip, and the unpacker truncates f32 to Tf32 on the way.
 //
-// `MOLA_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
+// `TUTTICORE_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
 bool isPackerL1AccReduceOnlyLoop(Operation *loopOp);
 
 // Find the closest ancestor reduction loop IV of `acquireDst`, where
