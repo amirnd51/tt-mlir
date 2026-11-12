@@ -790,3 +790,28 @@ Seen from MOLA on eight Wormhole chips (`libmola_tt_serve`
 chips, chips to host, host to chips: 2.7 ms a write. Direct: 0.38 ms
 (MOLA `progress/tt-wormhole-bringup.md`, 2026-10-13).
 
+
+### 46 — a padding view reads only inside its source; its padding is zeros (2026-11-12)
+
+`46-d2m-padding-view-zero-fill-2026-11-12.patch` —
+`lib/Dialect/D2M/Transforms/LowerToLayout/LowerToLayout.cpp`,
+`lib/Dialect/D2M/IR/D2MOps.cpp`,
+`lib/Dialect/D2M/Transforms/LowerDMAToFullyIndexedForm.cpp`,
+`lib/Conversion/D2MToTTKernel/D2MToTTKernel.cpp`
+
+The grid-padded relayout (a 32x448 f32 tensor's 14 tiles viewed as the 26
+tiles of its 32x832 padded image) read its 12 padding tiles from past its
+one-shard DRAM source: bank 1 at the source's address, memory no buffer owns
+(MOLA #1726). LowerToLayout now marks a view onto a larger device shape
+(`d2m.view_pads`); LowerDMAToFullyIndexedForm reads a marked view only
+inside its source and fills the rest from the core's `MEM_ZEROS` region
+(`d2m.zero_fill`, lowered by D2MToTTKernel to 512-byte NoC reads). The fill
+value is 0. A later reduction is not affected by it: TTIRToD2M masks a
+reduction's operand with that op's own neutral value (`d2m.mask`), and
+OptimizeMasks keeps that mask for a value it does not track. Unmarked views
+lower exactly as before. One commit (`816a448963`).
+
+Seen from MOLA (tt/audit-gridpad-pack, 2026-11-12): the six grid-padded
+staged shapes (32x448, 64x448, 32x512, 352x32, 352x64, 416x32) lower with
+the zero fill and pass MOLA's TT untiled preservation audit; 57 other TT
+modules lower byte-identically (the IR after convert-d2m-to-ttmetal).
