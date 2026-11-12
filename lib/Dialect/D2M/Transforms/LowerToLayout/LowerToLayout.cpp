@@ -350,10 +350,19 @@ public:
           baseLayout.getMemoryLayout());
       auto resultTy =
           RankedTensorType::get(toTy.getShape(), toTy.getElementType(), enc);
-      return rewriter
-          .create<ViewLayoutOp>(loc, resultTy, fromVal, map,
-                                /*reinterpretLayout=*/false)
-          .getResult();
+      auto view = rewriter.create<ViewLayoutOp>(loc, resultTy, fromVal, map,
+                                                /*reinterpretLayout=*/false);
+      // MOLA (#1726): a view onto a LARGER device shape (the grid-padded
+      // relayout, dim_alignments 32x32 -> 32x416: 14 tiles viewed as 26).
+      // The shared logical-space map is the identity past the source's
+      // extent, so the view indexes OUTSIDE its source there; those indices
+      // are padding, and the mark tells LowerDMAToFullyIndexedForm to read
+      // only inside the source and fill the rest with zeros.
+      if (ttmlir::utils::volume<int64_t>(toTy.getShape()) >
+          ttmlir::utils::volume<int64_t>(fromTy.getShape())) {
+        view->setAttr("d2m.view_pads", rewriter.getUnitAttr());
+      }
+      return view.getResult();
     };
 
     if (isSrcDramOrReblock) {

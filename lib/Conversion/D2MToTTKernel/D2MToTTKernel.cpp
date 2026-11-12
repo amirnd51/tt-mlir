@@ -2769,6 +2769,39 @@ public:
 
     Value nocId = materializeKernelNocId(rewriter, op.getOperation());
 
+    // MOLA (#1726): padding of a view read outside its source
+    // (LowerDMAToFullyIndexedForm's d2m.zero_fill). The destination is filled
+    // from this core's MEM_ZEROS region, which the firmware zeroes at start
+    // (tt-metal brisc.cc wzeromem(MEM_ZEROS_BASE, MEM_ZEROS_SIZE)); it is
+    // 512 bytes on Wormhole and Blackhole (dev_mem_map.h MEM_ZEROS_SIZE), so
+    // the fill is that many 512-byte reads. Nothing of the source is read.
+    if (op->hasAttr("d2m.zero_fill")) {
+      constexpr int64_t kMemZerosBytes = 512;
+      const int64_t bytes = op.getSizeBytes();
+      TT_assertv(bytes % kMemZerosBytes == 0,
+                 "a zero fill of {} bytes is not whole {}-byte reads", bytes,
+                 kMemZerosBytes);
+      Value zeros = rewriter.create<ttkernel::MemZerosBaseOp>(
+          loc, rewriter.getI32Type());
+      auto myY = rewriter.create<ttkernel::MyLogicalYOp>(loc);
+      auto myX = rewriter.create<ttkernel::MyLogicalXOp>(loc);
+      auto [virtY, virtX] = getVirtualCoordsFromLogicalCoords(
+          rewriter, loc, chipDesc, ValueRange{myY, myX});
+      NocEndpoint zerosEndpoint{
+          ttcore::MemorySpace::DeviceL1, {virtX, virtY}, nullptr, zeros};
+      auto chunk = intConstant<int32_t>(rewriter, loc, kMemZerosBytes);
+      for (int64_t off = 0; off < bytes; off += kMemZerosBytes) {
+        Value dst = dstL1Addr;
+        if (off != 0) {
+          dst = rewriter.create<arith::AddIOp>(
+              loc, dstL1Addr, intConstant<int32_t>(rewriter, loc, off));
+        }
+        createNocAsyncRead(rewriter, loc, zerosEndpoint, dst, chunk, nocId);
+      }
+      rewriter.replaceOpWithNewOp<d2m::NullTxOp>(op, op.getResult().getType());
+      return success();
+    }
+
     if (op.isSrcLocal()) {
       Value srcL1Addr = buildL1Address<ttkernel::GetReadPtrOp>(
           rewriter, loc, adaptor.getSrc(), op.getSrcIndices());

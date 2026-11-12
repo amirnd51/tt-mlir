@@ -1217,6 +1217,8 @@ mlir::LogicalResult d2m::ViewLayoutOp::bufferize(
   auto newOp = rewriter.create<d2m::ViewLayoutOp>(getLoc(), outMemrefType,
                                                   *maybeInput, getRemapping(),
                                                   getReinterpretLayout());
+  // (MOLA #1726: a mark LowerToLayout set, d2m.view_pads, stays on the view)
+  newOp->setDiscardableAttrs(getOperation()->getDiscardableAttrDictionary());
 
   mlir::bufferization::replaceOpWithBufferizedValues(rewriter, *this,
                                                      newOp.getResult());

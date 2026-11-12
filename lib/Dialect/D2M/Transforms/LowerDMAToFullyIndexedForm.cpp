@@ -408,6 +408,101 @@ static Value generateDMAWithCoalescing(OpBuilder &builder, Location loc,
   return loopNest.results.front();
 }
 
+// MOLA (#1726): a DMA read through a view that maps part of its iteration
+// space OUTSIDE its source memref's shape. A padding relayout lowered through
+// shared logical space (LowerToLayout's buildLayoutTransformMap) does this:
+// the padded tiles of the view have no source tile, and the source's memory
+// map would send them to a shard the source does not have (another DRAM
+// bank, memory no buffer owns). Such a read is lowered only where its index
+// lies inside the source; the rest of the destination is padding, filled
+// with zeros (the dma_read carries kZeroFillAttr; D2MToTTKernel reads the
+// core's MEM_ZEROS region for it). A view that stays inside its source is
+// lowered exactly as before.
+static constexpr llvm::StringLiteral kZeroFillAttr = "d2m.zero_fill";
+static constexpr llvm::StringLiteral kViewPadsAttr = "d2m.view_pads";
+static constexpr int64_t kOutsideSourceScanLimit = int64_t{1} << 22;
+
+// Asked only of a view LowerToLayout marked kViewPadsAttr (a padding
+// change that grows the tensor: an index outside the source's shape, in any
+// dimension, is padding). Whether `viewMap` (view index -> source index)
+// sends any point of grid x shard outside `sourceShape`; and whether each
+// coalesced chunk of `coalescingFactor` consecutive shard points is wholly
+// inside or wholly outside (else the factor is cut to 1, so a guarded read
+// never straddles). `below` / `above`: per source dimension, whether some
+// point falls below 0 or at or past its extent (the guard compares only
+// those). (Other views are not asked: a view may overflow a shard dimension
+// on purpose and stay inside the shard, as a broadcast does.)
+static bool viewReadsOutsideSource(AffineMap viewMap,
+                                   ArrayRef<int64_t> sourceShape,
+                                   ArrayRef<int64_t> gridShape,
+                                   ArrayRef<int64_t> shardShape,
+                                   size_t &coalescingFactor,
+                                   SmallVectorImpl<bool> &below,
+                                   SmallVectorImpl<bool> &above,
+                                   bool &sameOnEveryCore) {
+  const size_t rank = gridShape.size() + shardShape.size();
+  if (viewMap.getNumSymbols() != 0 || viewMap.getNumDims() != rank ||
+      viewMap.getNumResults() != sourceShape.size()) {
+    return false;
+  }
+  SmallVector<int64_t> dims(gridShape.begin(), gridShape.end());
+  dims.append(shardShape.begin(), shardShape.end());
+  below.assign(sourceShape.size(), false);
+  above.assign(sourceShape.size(), false);
+  const int64_t gridVolume = ttmlir::utils::volume(gridShape);
+  const int64_t shardVolume = ttmlir::utils::volume(shardShape);
+  if (gridVolume <= 0 || shardVolume <= 0 ||
+      gridVolume > kOutsideSourceScanLimit / shardVolume) {
+    return false;
+  }
+  auto inside = [&](int64_t g, int64_t t) {
+    SmallVector<int64_t> point(rank, 0);
+    int64_t rest = t;
+    for (size_t i = shardShape.size(); i-- > 0;) {
+      point[gridShape.size() + i] = rest % shardShape[i];
+      rest /= shardShape[i];
+    }
+    rest = g;
+    for (size_t i = gridShape.size(); i-- > 0;) {
+      point[i] = rest % gridShape[i];
+      rest /= gridShape[i];
+    }
+    SmallVector<int64_t> source = viewMap.compose(point);
+    bool in = true;
+    for (size_t i = 0; i < source.size(); ++i) {
+      if (source[i] < 0) {
+        below[i] = true;
+        in = false;
+      }
+      if (source[i] >= sourceShape[i]) {
+        above[i] = true;
+        in = false;
+      }
+    }
+    return in;
+  };
+  bool any = false;
+  bool straddles = false;
+  sameOnEveryCore = true;
+  const int64_t cf = static_cast<int64_t>(coalescingFactor);
+  for (int64_t g = 0; g < gridVolume; ++g) {
+    for (int64_t t = 0; t < shardVolume; ++t) {
+      const bool in = inside(g, t);
+      any = any || !in;
+      if (g != 0 && in != inside(0, t)) {
+        sameOnEveryCore = false;
+      }
+      if (cf > 1 && t % cf != 0 && in != inside(g, t - t % cf)) {
+        straddles = true;
+      }
+    }
+  }
+  if (any && straddles) {
+    coalescingFactor = 1;
+  }
+  return any;
+}
+
 namespace {
 class D2MLowerDMAReadToFullyIndexed : public OpRewritePattern<DMAReadOp> {
 public:
@@ -461,21 +556,103 @@ public:
 
     SmallVector<Value> gridIndices(op.getSrcIndices());
 
+    // (MOLA #1726: a view that reads outside its source)
+    AffineMap viewMap;
+    SmallVector<int64_t> sourceShape;
+    bool guardSource = false;
+    SmallVector<bool> below, above;
+    bool sameOnEveryCore = false;
+    if (Operation *definingOp = remoteMemref.getDefiningOp()) {
+      if (auto viewOp = mlir::dyn_cast<ViewOpInterface>(definingOp);
+          viewOp && !viewOp.isComposite() &&
+          definingOp->hasAttr(kViewPadsAttr)) {
+        MemRefType baseType;
+        std::tie(baseType, viewMap) = applyViews(definingOp);
+        sourceShape.assign(baseType.getShape().begin(),
+                           baseType.getShape().end());
+        guardSource = viewReadsOutsideSource(
+            viewMap, sourceShape, gridShape, shardShape, coalescingFactor,
+            below, above, sameOnEveryCore);
+      }
+    }
+
     Value newTx = generateDMAWithCoalescing(
         rewriter, loc, shardShape, coalescingFactor, DMAType::Read,
         [&](OpBuilder &b, Location l, ValueRange iters, size_t cf) -> Value {
-          SmallVector<Value> remoteIndices =
+          SmallVector<Value> viewIndices =
               llvm::to_vector(llvm::concat<Value>(gridIndices, iters));
           SmallVector<Value> localIndices = llvm::to_vector(iters);
 
-          remoteIndices =
-              utils::applyMap(b, l, remoteMemoryMap, remoteIndices, true);
+          SmallVector<Value> remoteIndices =
+              utils::applyMap(b, l, remoteMemoryMap, viewIndices, true);
           localIndices =
               utils::applyMap(b, l, localMemoryMap, localIndices, false);
 
-          return b.create<DMAReadOp>(l, remoteMemref, remoteIndices,
-                                     localMemref, localIndices,
-                                     b.getI64IntegerAttr(cf));
+          if (!guardSource) {
+            return b.create<DMAReadOp>(l, remoteMemref, remoteIndices,
+                                       localMemref, localIndices,
+                                       b.getI64IntegerAttr(cf));
+          }
+          // In the source: 0 <= viewMap(index)[i] < sourceShape[i], for each
+          // bound the scan found crossed. Each comparison becomes an index 0
+          // or 1 (select) and their product is compared once, so every i1 is
+          // a comparison used only as a condition.
+          Value one = b.create<arith::ConstantIndexOp>(l, 1);
+          Value zero = b.create<arith::ConstantIndexOp>(l, 0);
+          Value product = one;
+          auto factor = [&](arith::CmpIPredicate pred, Value lhs,
+                            int64_t rhs) {
+            Value c = b.create<arith::CmpIOp>(
+                l, pred, lhs, b.create<arith::ConstantIndexOp>(l, rhs));
+            Value bit = b.create<arith::SelectOp>(l, c, one, zero);
+            product = b.create<arith::MulIOp>(l, product, bit);
+          };
+          // Where every core reads the same tiles of the source in bounds,
+          // the guard is asked at grid point 0: a function of the loop index
+          // alone, the same on every core.
+          SmallVector<Value> guardIndices = viewIndices;
+          if (sameOnEveryCore) {
+            for (size_t g = 0; g < gridIndices.size(); ++g) {
+              guardIndices[g] = zero;
+            }
+          }
+          for (unsigned i = 0; i < viewMap.getNumResults(); ++i) {
+            if (!below[i] && !above[i]) {
+              continue;
+            }
+            Value at = b.create<affine::AffineApplyOp>(
+                l, viewMap.getSubMap({i}), guardIndices);
+            if (below[i]) {
+              factor(arith::CmpIPredicate::sge, at, 0);
+            }
+            if (above[i]) {
+              factor(arith::CmpIPredicate::slt, at, sourceShape[i]);
+            }
+          }
+          Value inside = b.create<arith::CmpIOp>(
+              l, arith::CmpIPredicate::eq, product, one);
+          Type txType = op.getResult().getType();
+          auto branch = b.create<scf::IfOp>(l, TypeRange{txType}, inside,
+                                            /*addThenBlock=*/true,
+                                            /*addElseBlock=*/true);
+          {
+            OpBuilder then = branch.getThenBodyBuilder();
+            Value tx = then.create<DMAReadOp>(l, remoteMemref, remoteIndices,
+                                              localMemref, localIndices,
+                                              then.getI64IntegerAttr(cf));
+            then.create<scf::YieldOp>(l, tx);
+          }
+          {
+            // Padding: the same destination, filled with zeros. (The source
+            // indices are kept for the op's form and are not read.)
+            OpBuilder other = branch.getElseBodyBuilder();
+            auto fill = other.create<DMAReadOp>(l, remoteMemref, remoteIndices,
+                                                localMemref, localIndices,
+                                                other.getI64IntegerAttr(cf));
+            fill->setAttr(kZeroFillAttr, other.getUnitAttr());
+            other.create<scf::YieldOp>(l, fill.getResult());
+          }
+          return branch.getResult(0);
         });
 
     rewriter.replaceOp(op, newTx);
