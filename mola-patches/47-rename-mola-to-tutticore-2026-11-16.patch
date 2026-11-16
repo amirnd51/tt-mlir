@@ -1,0 +1,1347 @@
+From 388ddf0b7c0743a2789af07fed6694c9644c8909 Mon Sep 17 00:00:00 2001
+From: Amir Nassereldine <46420889+amirnd51@users.noreply.github.com>
+Date: Thu, 22 Oct 2026 16:27:40 -0400
+Subject: [PATCH] Rename MOLA to Tutticore in the local patch series
+
+The compiler that drives this fork renamed itself from MOLA to Tutticore
+(dialect tutticore, language Tutti). Rename the names the two sides share
+in lockstep: the attributes tutticore.target / tutticore.memspace /
+tutticore.placement_done / tutticore.in_l1 / tutticore.lhs_l1 /
+tutticore.out_l1, the pipeline options tutticore-placement-pipeline and
+tutticore-pre-to-d2m-pipeline, and the TUTTICORE_TT_* switches. Comments
+follow. mola-patches/ is the historical mirror and is left as it was.
+
+Replayed onto 9b2157f (record 46, padding view zero fill) from 9d539f37,
+which made the same change on b88ff0c; the five MOLA comments 816a448
+added are renamed the same way.
+
+Not built or tested here: no TT toolchain on the machine that made it.
+---
+ CMakeLists.txt                                |  16 +-
+ .../Dialect/D2M/Analysis/GridAnalysis.h       |   2 +-
+ .../Dialect/D2M/Pipelines/D2MPipelines.h      |  20 +--
+ .../InsertDstRegisterAccess/Shared.h          |   2 +-
+ include/ttmlir/Dialect/D2M/Utils/Utils.h      |   2 +-
+ lib/CMakeLists.txt                            |   4 +-
+ .../D2MToTTKernel/D2MToTTKernel.cpp           |   2 +-
+ lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp  |  10 +-
+ lib/Conversion/TTIRToD2M/TTIRToD2M.cpp        | 168 +++++++++---------
+ .../TTIRToTTIRDecomposition.cpp               |  12 +-
+ lib/Dialect/D2M/Analysis/GridAnalysis.cpp     |   8 +-
+ lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp    |   8 +-
+ lib/Dialect/D2M/IR/D2MOps.cpp                 |   4 +-
+ lib/Dialect/D2M/Pipelines/D2MPipelines.cpp    |  16 +-
+ lib/Dialect/D2M/Transforms/Allocate.cpp       |  44 ++---
+ lib/Dialect/D2M/Transforms/GridSelection.cpp  |  10 +-
+ .../InsertDstRegisterAccess/Shared.cpp        |   4 +-
+ .../Transforms/LowerDMAToFullyIndexedForm.cpp |   4 +-
+ .../LowerToLayout/LowerToLayout.cpp           |   2 +-
+ .../D2M/Transforms/LowerToLayout/Plan.cpp     |   2 +-
+ .../D2M/Transforms/ScalarizeConstTensors.cpp  |   4 +-
+ lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp |   2 +-
+ lib/Dialect/D2M/Utils/GridSelectionUtils.cpp  |   2 +-
+ lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp      |   2 +-
+ lib/Dialect/TTCore/Utils/AffineMapUtils.cpp   |   4 +-
+ lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp  |   2 +-
+ .../Transforms/DecomposeComplexReshape.cpp    |   2 +-
+ lib/Target/TTMetal/TTMetalToFlatbuffer.cpp    |   4 +-
+ runtime/lib/ttmetal/runtime.cpp               |   2 +-
+ .../reshape_unaligned_inner_l1_staging.mlir   |   2 +-
+ 30 files changed, 183 insertions(+), 183 deletions(-)
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index b9a1728..7e2be1e 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -108,11 +108,11 @@ if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+ endif()
+ 
+ add_compile_options(-Wall -Wextra -Wpedantic -Werror -Wno-unused-parameter --system-header-prefix=ENV{TTMLIR_TOOLCHAIN_DIR}
+-  # MOLA local patch (2026-05-11): MOLA's bundled LLVM (sha 8f264586d752,
++  # Tutticore local patch (2026-05-11): Tutticore's bundled LLVM (sha 8f264586d752,
+   # Dec 12 2025) marks OpBuilder::create<OpTy> deprecated in favor of
+   # OpTy::create. tt-mlir source still uses the old form throughout;
+   # silence the warning so -Werror doesn't fail the build when linking
+-  # against MOLA's LLVM.
++  # against Tutticore's LLVM.
+   -Wno-deprecated-declarations)
+ 
+ set(CMAKE_LINKER_TYPE DEFAULT)
+@@ -171,9 +171,9 @@ include_directories(SYSTEM ${LLVM_INCLUDE_DIRS})
+ include_directories(SYSTEM ${MLIR_INCLUDE_DIRS})
+ include_directories(${TTMLIR_SOURCE_DIR}/include)
+ include_directories(${TTMLIR_BINARY_DIR}/include)
+-# MOLA local patch (2026-05-11): mark toolchain include dir as SYSTEM
++# Tutticore local patch (2026-05-11): mark toolchain include dir as SYSTEM
+ # so it's searched AFTER MLIR_INCLUDE_DIRS. When MLIR_DIR points at a
+-# different LLVM install (e.g. /home/amirnass/projects/mola/build/llvm-install)
++# different LLVM install (e.g. /home/amirnass/projects/tutticore/build/llvm-install)
+ # than the toolchain, the toolchain headers (at a different LLVM sha)
+ # must NOT shadow the MLIR install's headers — otherwise we get header
+ # vs lib mismatches like "no viable conversion from RegionBranchPoint
+@@ -186,9 +186,9 @@ include(TTMLIRPythonSitePackages)
+ add_subdirectory(third_party)
+ if (TTMLIR_ENABLE_STABLEHLO)
+   set(STABLEHLO_BUILD_EMBEDDED ON)
+-  # MOLA F3 (2026-05-12), REVISED 2026-08-24: this used to force OFF because
+-  # MOLA's build/llvm-install had no MLIR_ENABLE_BINDINGS_PYTHON, so
+-  # MLIRPythonSources / MLIRPythonExtension did not exist. MOLA commit 7629a61
++  # Tutticore F3 (2026-05-12), REVISED 2026-08-24: this used to force OFF because
++  # Tutticore's build/llvm-install had no MLIR_ENABLE_BINDINGS_PYTHON, so
++  # MLIRPythonSources / MLIRPythonExtension did not exist. Tutticore commit 7629a61
+   # turned those bindings ON (upstream stablehlo's
+   # mlir_configure_python_dev_packages needs them), so the guard is now not only
+   # unnecessary but harmful: with it OFF, stablehlo never defines
+@@ -201,7 +201,7 @@ if (TTMLIR_ENABLE_STABLEHLO)
+   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/shardy)
+   include_directories(SYSTEM ${CMAKE_CURRENT_BINARY_DIR}/stablehlo)
+   include_directories(SYSTEM ${TTMLIR_TOOLCHAIN_DIR}/src/stablehlo)
+-  # MOLA F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
++  # Tutticore F3 (2026-05-12): inject `using mlir::stablehlo::TokenType;` via
+   # add_compile_options BEFORE the add_subdirectory call. Newer LLVM/MLIR
+   # TableGen emits unqualified `TokenType` references in each stablehlo
+   # *.cpp.inc verifier predicate (StablehloOps.cpp.inc, InterpreterOps.cpp.
+diff --git a/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h b/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
+index b6889d1..f96ebbf 100644
+--- a/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
++++ b/include/ttmlir/Dialect/D2M/Analysis/GridAnalysis.h
+@@ -142,7 +142,7 @@ private:
+       results;
+   llvm::SmallVector<int64_t> deviceGridShape;
+   bool ttnnMode;
+-  // (MOLA) Double-buffered shard budget, in bytes, for an input operand along
++  // (Tutticore) Double-buffered shard budget, in bytes, for an input operand along
+   // a reduction axis; nullopt streams the axis one virtual core per block as
+   // upstream does. See clampReductionSplit in GridAnalysis.cpp.
+   std::optional<uint64_t> reductionShardBudgetBytes;
+diff --git a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+index a3bfbad..15baadf 100644
+--- a/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
++++ b/include/ttmlir/Dialect/D2M/Pipelines/D2MPipelines.h
+@@ -151,25 +151,25 @@ struct D2MPipelineOptions : public PassPipelineOptions<D2MPipelineOptions> {
+           "Force all non-bound allocator variables to spill into DRAM."),
+       llvm::cl::init(false)};
+ 
+-  // MOLA local hook (2026-05-12): a pass-pipeline string parsed and run
++  // Tutticore local hook (2026-05-12): a pass-pipeline string parsed and run
+   // right after ttir-to-d2m (where tensors carry per-tensor
+   // MetalLayoutAttr memory_space) and before grid-selection. Lets an
+-  // out-of-tree policy layer (MOLA) annotate per-tensor L1/DRAM placement
++  // out-of-tree policy layer (Tutticore) annotate per-tensor L1/DRAM placement
+   // that D2MAllocate then honors. Empty = no-op; the named pass must be
+   // in the global pass registry at runtime.
+-  Option<std::string> molaPlacementPipeline{
+-      *this, "mola-placement-pipeline",
+-      llvm::cl::desc("Pass-pipeline run after ttir-to-d2m for MOLA "
++  Option<std::string> tutticorePlacementPipeline{
++      *this, "tutticore-placement-pipeline",
++      llvm::cl::desc("Pass-pipeline run after ttir-to-d2m for Tutticore "
+                      "per-tensor placement annotation (empty = off)."),
+       llvm::cl::init("")};
+ 
+-  // MOLA D2M-emitter hook: a pass-pipeline run BEFORE ttir-to-d2m (on TTIR), so
+-  // MOLA can emit d2m.* ops itself for supported ops; createTTIRToD2MPass then
++  // Tutticore D2M-emitter hook: a pass-pipeline run BEFORE ttir-to-d2m (on TTIR), so
++  // Tutticore can emit d2m.* ops itself for supported ops; createTTIRToD2MPass then
+   // lowers the remainder (emit-or-delegate). Empty = off; the named pass must be
+   // in the global pass registry at runtime.
+-  Option<std::string> molaPreToD2MPipeline{
+-      *this, "mola-pre-to-d2m-pipeline",
+-      llvm::cl::desc("Pass-pipeline run before ttir-to-d2m for MOLA's own "
++  Option<std::string> tutticorePreToD2MPipeline{
++      *this, "tutticore-pre-to-d2m-pipeline",
++      llvm::cl::desc("Pass-pipeline run before ttir-to-d2m for Tutticore's own "
+                      "TTIR->D2M emission (empty = off)."),
+       llvm::cl::init("")};
+ 
+diff --git a/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h b/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
+index b618f55..d6ef124 100644
+--- a/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
++++ b/include/ttmlir/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.h
+@@ -203,7 +203,7 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp);
+ // across DST flips reloads its running sum from L1 through the unpacker on
+ // every flip, and the unpacker truncates f32 to Tf32 on the way.
+ //
+-// `MOLA_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
++// `TUTTICORE_TT_D2M_REDUCE_L1_ACC=0` disables this qualification (A/B switch).
+ bool isPackerL1AccReduceOnlyLoop(Operation *loopOp);
+ 
+ // Find the closest ancestor reduction loop IV of `acquireDst`, where
+diff --git a/include/ttmlir/Dialect/D2M/Utils/Utils.h b/include/ttmlir/Dialect/D2M/Utils/Utils.h
+index 76195af..5f40cbe 100644
+--- a/include/ttmlir/Dialect/D2M/Utils/Utils.h
++++ b/include/ttmlir/Dialect/D2M/Utils/Utils.h
+@@ -48,7 +48,7 @@ inline bool isReductionScalerBuffer(Operation *op) {
+ // a hard precondition: violating it aborts the process, so a caller that cannot
+ // guarantee divisibility must ask FIRST rather than try and recover.
+ //
+-// (MOLA) Added because the precondition was in fact reachable from grid
++// (Tutticore) Added because the precondition was in fact reachable from grid
+ // selection: the divisor is chosen against one shape, and by the time reblocking
+ // runs the shape has been through interval collapse and alignment, so the
+ // divisor need not still divide. See the guarded call sites in
+diff --git a/lib/CMakeLists.txt b/lib/CMakeLists.txt
+index fd06c40..3356dfc 100644
+--- a/lib/CMakeLists.txt
++++ b/lib/CMakeLists.txt
+@@ -20,7 +20,7 @@ get_property(conversion_libs GLOBAL PROPERTY MLIR_CONVERSION_LIBS)
+ get_property(extension_libs GLOBAL PROPERTY MLIR_EXTENSION_LIBS)
+ get_property(translation_libs GLOBAL PROPERTY MLIR_TRANSLATION_LIBS)
+ 
+-# MOLA local patch (2026-05-11): split MLIR libs from tt-mlir's own
++# Tutticore local patch (2026-05-11): split MLIR libs from tt-mlir's own
+ # libs. When MLIR_LINK_MLIR_DYLIB=ON, MLIR libs link via libMLIR.so
+ # (single shared MLIR in the process). Only tt-mlir's own static libs
+ # get --whole-archive'd into libTTMLIRCompiler.so. Without this split,
+@@ -152,7 +152,7 @@ else()
+ endif()
+ 
+ target_link_libraries(TTMLIRCompiler PRIVATE
+-    # MOLA F3 path C (2026-05-11): force libMLIR.so + libLLVM.so to be
++    # Tutticore F3 path C (2026-05-11): force libMLIR.so + libLLVM.so to be
+     # processed BEFORE any MLIR/LLVM static archive in the link line.
+     # Otherwise the linker walks .a files first; their TUs (e.g.
+     # LLVMCodeGen's "enable-branch-hint" cl::opt, MLIR SparseTensor's
+diff --git a/lib/Conversion/D2MToTTKernel/D2MToTTKernel.cpp b/lib/Conversion/D2MToTTKernel/D2MToTTKernel.cpp
+index 2a7438e..f93140c 100644
+--- a/lib/Conversion/D2MToTTKernel/D2MToTTKernel.cpp
++++ b/lib/Conversion/D2MToTTKernel/D2MToTTKernel.cpp
+@@ -2769,7 +2769,7 @@ public:
+ 
+     Value nocId = materializeKernelNocId(rewriter, op.getOperation());
+ 
+-    // MOLA (#1726): padding of a view read outside its source
++    // Tutticore (#1726): padding of a view read outside its source
+     // (LowerDMAToFullyIndexedForm's d2m.zero_fill). The destination is filled
+     // from this core's MEM_ZEROS region, which the firmware zeroes at start
+     // (tt-metal brisc.cc wzeromem(MEM_ZEROS_BASE, MEM_ZEROS_SIZE)); it is
+diff --git a/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp b/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
+index 571b84c..00e1c16 100644
+--- a/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
++++ b/lib/Conversion/D2MToTTMetal/D2MToTTMetal.cpp
+@@ -156,14 +156,14 @@ public:
+         // input is held as Tf32, and a kernel mixing the two modes produced
+         // NaN outputs. Upstream set Fp32 only for typecast kernels and only
+         // on port 0; a Default read of an f32 input drops the low 13 mantissa
+-        // bits (MOLA experiments/tt/probes/qwen/f32_identity_mul.py,
++        // bits (Tutticore experiments/tt/probes/qwen/f32_identity_mul.py,
+         // 2026-09-05), and a two-input SFPU kernel needs both ports covered.
+         std::vector<UnpackToDestMode> unpackModes(
+             std::max<size_t>(1, cbOperandIndexToPort.size()),
+             UnpackToDestMode::Default);
+-        // MOLA_TT_D2M_FP32_UNPACK=0 restores upstream's typecast-only, port-0
++        // TUTTICORE_TT_D2M_FP32_UNPACK=0 restores upstream's typecast-only, port-0
+         // rule for an A/B.
+-        const char *fp32UnpackSwitch = std::getenv("MOLA_TT_D2M_FP32_UNPACK");
++        const char *fp32UnpackSwitch = std::getenv("TUTTICORE_TT_D2M_FP32_UNPACK");
+         const bool fp32Unpack = !(fp32UnpackSwitch && fp32UnpackSwitch[0] == '0');
+         if (fp32DestAccum && !fp32Unpack) {
+           if (kernelContainsTypecast(thread.getKernelSymbol())) {
+@@ -176,11 +176,11 @@ public:
+               unpackModes[port] = UnpackToDestMode::Fp32;
+             }
+           }
+-          // (MOLA, 2026-09-06) A relayout kernel (tilize / untilize and
++          // (Tutticore, 2026-09-06) A relayout kernel (tilize / untilize and
+           // nothing else) moves an f32 tensor through the FPU datacopy path,
+           // and srcA holds an f32 as Tf32: every f32 tensor D2M wrote back to
+           // the host had its low 13 mantissa bits zero, while the same value
+-          // through TTNN was exact (MOLA experiments/tt/probes/normbias/
++          // through TTNN was exact (Tutticore experiments/tt/probes/normbias/
+           // f32_output_scale, 2026-09-06). TTIRToD2M brackets nearly every
+           // op with such a pair, so each f32 intermediate lost 13 bits per
+           // boundary. tilize_block and pack_untilize_block both take their
+diff --git a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+index 3b293a2..3a3a190 100644
+--- a/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
++++ b/lib/Conversion/TTIRToD2M/TTIRToD2M.cpp
+@@ -55,12 +55,12 @@ namespace mlir::tt {
+ 
+ namespace {
+ 
+-/// MOLA: does `v` root at a constant/weight (peeling reshape/broadcast/typecast/
++/// Tutticore: does `v` root at a constant/weight (peeling reshape/broadcast/typecast/
+ /// permute/view ops)? Constants must NOT be L1-pinned by opt #1/#2 — mis-placing
+ /// a constant fill on the D2M path silently degenerates the consumer to a
+ /// passthrough (see the constant-memspace handling in createOptimalLayoutOp), so
+ /// pinning a bias/scale/mask constant feeding an elementwise op would miscompile.
+-static bool molaRootsAtConstant(mlir::Value v) {
++static bool tutticoreRootsAtConstant(mlir::Value v) {
+   mlir::Operation *d = v.getDefiningOp();
+   while (d) {
+     llvm::StringRef n = d->getName().getStringRef();
+@@ -482,26 +482,26 @@ protected:
+                                  ttcore::OOBVal::Undef);
+   }
+ 
+-  // MOLA local hook (2026-06-03): per-tensor L1/DRAM placement override.
+-  // MOLA's policy layer (driven by mola.target) annotates individual
+-  // tensors with a `mola.memspace` = "l1" | "dram" StringAttr — on the
++  // Tutticore local hook (2026-06-03): per-tensor L1/DRAM placement override.
++  // Tutticore's policy layer (driven by tutticore.target) annotates individual
++  // tensors with a `tutticore.memspace` = "l1" | "dram" StringAttr — on the
+   // owning func argument for leaf inputs, or on the defining op for
+   // intermediates. Honored HERE, before the data-movement region is
+   // generated, so remote_load-vs-local-read codegen is derived
+   // consistently (a post-ttir-to-d2m MetalLayoutAttr flip is unsound —
+   // it desyncs the already-baked addressing). Absent the attr, the
+   // role default (memorySpaces[role]) is used unchanged.
+-  static ttcore::MemorySpace resolveMolaMemSpace(Value v,
++  static ttcore::MemorySpace resolveTutticoreMemSpace(Value v,
+                                                  ttcore::MemorySpace dflt) {
+     mlir::StringAttr s;
+     if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(v)) {
+       if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+               barg.getOwner()->getParentOp())) {
+         s = fn.getArgAttrOfType<mlir::StringAttr>(barg.getArgNumber(),
+-                                                  "mola.memspace");
++                                                  "tutticore.memspace");
+       }
+     } else if (mlir::Operation *def = v.getDefiningOp()) {
+-      s = def->getAttrOfType<mlir::StringAttr>("mola.memspace");
++      s = def->getAttrOfType<mlir::StringAttr>("tutticore.memspace");
+     }
+     if (s) {
+       if (s.getValue() == "l1") {
+@@ -525,7 +525,7 @@ protected:
+ 
+     for (Value operand : operandsAndResults[0]) {
+       result[0].push_back(createOptimalLayoutOp(
+-          operand, resolveMolaMemSpace(operand, memorySpaces[0]), tiled,
++          operand, resolveTutticoreMemSpace(operand, memorySpaces[0]), tiled,
+           noCollapse, rewriter, oobVal));
+     }
+     // Outputs always use Undef: they are destination buffers being written
+@@ -533,7 +533,7 @@ protected:
+     // identity-element OOB to prevent padded tiles from corrupting reductions.
+     for (Value operand : operandsAndResults[1]) {
+       result[1].push_back(createOptimalLayoutOp(
+-          operand, resolveMolaMemSpace(operand, memorySpaces[1]), tiled,
++          operand, resolveTutticoreMemSpace(operand, memorySpaces[1]), tiled,
+           noCollapse, rewriter));
+     }
+ 
+@@ -828,16 +828,16 @@ protected:
+     SmallVector<Value> origInputs;
+     SmallVector<Value> origOutputs =
+         createDpsOutputs(loc, rewriter, {resultType});
+-    // MOLA local patch (2026-06-06): a constant fill's result feeds device
++    // Tutticore local patch (2026-06-06): a constant fill's result feeds device
+     // compute as an INPUT, so place it in the input-role memory space, not
+-    // the output role. With MOLA's dram-input/l1-output split the old
++    // the output role. With Tutticore's dram-input/l1-output split the old
+     // output-role (L1) placement forced a device-side L1 -> logical -> DRAM
+     // restage between the fill and its consumer, and that intermediate
+     // restage silently produces wrong data (consumer degenerates to a
+     // passthrough; arg-fed matmuls staged dram-direct are exact). Routing
+     // the fill straight to the input space removes the broken roundtrip.
+     if (mlir::Operation *def = origOutputs.front().getDefiningOp()) {
+-      def->setAttr("mola.memspace",
++      def->setAttr("tutticore.memspace",
+                    mlir::StringAttr::get(
+                        rewriter.getContext(),
+                        memorySpaces[0] == ttcore::MemorySpace::DeviceL1
+@@ -1316,7 +1316,7 @@ private:
+     };
+     bool isImplicitBcast = computeIsImplicitBcast();
+ 
+-    // MOLA local patch 39 (2026-09-06): an f32 elementwise op does not fold a
++    // Tutticore local patch 39 (2026-09-06): an f32 elementwise op does not fold a
+     // broadcast operand into its kernel. The folded broadcast is a
+     // `tile_bcast` (unary_bcast, an srcA op), so the kernel is no longer
+     // SFPU-only and every f32 operand it reads comes through the 19-bit
+@@ -1327,9 +1327,9 @@ private:
+     // bias added to the f32 accumulator: implicit broadcast 0.99988 of the
+     // f32 reference, materialised operand 1.00011 (bf16 torch 1.00009);
+     // experiments/tt/probes/pythia/py_linear_*. Same-rank operands only;
+-    // MOLA_TT_D2M_F32_BCAST_MATERIALIZE=0 restores the fold.
++    // TUTTICORE_TT_D2M_F32_BCAST_MATERIALIZE=0 restores the fold.
+     if (isImplicitBcast && origInputs.size() >= 2) {
+-      const char *sw = std::getenv("MOLA_TT_D2M_F32_BCAST_MATERIALIZE");
++      const char *sw = std::getenv("TUTTICORE_TT_D2M_F32_BCAST_MATERIALIZE");
+       const bool enabled = !(sw && sw[0] == '0' && sw[1] == '\0');
+       auto isF32 = [](Value v) {
+         auto t = mlir::dyn_cast<RankedTensorType>(v.getType());
+@@ -1337,7 +1337,7 @@ private:
+       };
+       const bool anyF32 = isF32(op->getResult(0)) ||
+                           llvm::any_of(origInputs, isF32);
+-      // MOLA local patch 43 (2026-10-09): the same for an INTEGER operand,
++      // Tutticore local patch 43 (2026-10-09): the same for an INTEGER operand,
+       // where the fold is not a rounding but a wrong answer. Measured on
+       // Wormhole: eq(i32[1,2048], i32[1,1]) -- a position compared with an
+       // index vector, the mask of a served KV-cache write -- returned 1158
+@@ -1375,12 +1375,12 @@ private:
+                                     inType.getEncoding()),
+               origInputs[j], bcastDims);
+           // The materialised tensor takes the default placement (L1 for
+-          // MOLA's tt configuration). Pinning it to DRAM was tried and made
++          // Tutticore's tt configuration). Pinning it to DRAM was tried and made
+           // things worse: a DRAM operand is streamed through an L1 buffer of
+           // its own, and bloom-560m, which fits with the tensor resident,
+           // stopped fitting (required 1507328 B against 1461376 usable); a
+           // model that does not fit with the exact bias epilogue falls back
+-          // in MOLA's TTBackend instead. A `mola.memspace` marker set by a
++          // in Tutticore's TTBackend instead. A `tutticore.memspace` marker set by a
+           // placement pass is still honoured by the broadcast rewriter.
+           origInputs[j] = bcast.getResult();
+           changed = true;
+@@ -1393,20 +1393,20 @@ private:
+       }
+     }
+ 
+-    // MOLA opt #2 (MOLA_TT_FUSE_DRAM): if molaPinActivations marked this
++    // Tutticore opt #2 (TUTTICORE_TT_FUSE_DRAM): if tutticorePinActivations marked this
+     // elementwise op, pin its intermediate inputs into L1 so the producer->
+     // consumer round-trip stays in L1 (vs write-to-DRAM + read). Tag the adapted
+-    // input operands' defining ops — resolveMolaMemSpace honors them below.
+-    if (op->hasAttr("mola.in_l1")) {
++    // input operands' defining ops — resolveTutticoreMemSpace honors them below.
++    if (op->hasAttr("tutticore.in_l1")) {
+       auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+       for (Value in : origInputs) {
+         // Pin only genuine intermediates — never a constant/weight (mis-placing
+         // a constant fill on this path silently degenerates to a passthrough).
+-        if (molaRootsAtConstant(in)) {
++        if (tutticoreRootsAtConstant(in)) {
+           continue;
+         }
+         if (mlir::Operation *def = in.getDefiningOp()) {
+-          def->setAttr("mola.memspace", l1);
++          def->setAttr("tutticore.memspace", l1);
+         }
+       }
+     }
+@@ -1786,13 +1786,13 @@ private:
+     SmallVector<Value> origInputs = {adaptor.getInput()};
+     SmallVector<Value> origOutputs =
+         createDpsOutputs(loc, rewriter, {op.getResult().getType()});
+-    // A `mola.memspace` marker on the broadcast describes its result; the
++    // A `tutticore.memspace` marker on the broadcast describes its result; the
+     // DPS init is that result's defining value at layout time, so carry the
+     // marker over and the producer lands where the consumers expect it.
+-    if (auto ms = op->getAttrOfType<mlir::StringAttr>("mola.memspace")) {
++    if (auto ms = op->getAttrOfType<mlir::StringAttr>("tutticore.memspace")) {
+       for (Value out : origOutputs) {
+         if (Operation *def = out.getDefiningOp()) {
+-          def->setAttr("mola.memspace", ms);
++          def->setAttr("tutticore.memspace", ms);
+         }
+       }
+     }
+@@ -2655,51 +2655,51 @@ private:
+         mlir::cast<RankedTensorType>(origInputs[0].getType());
+     bool noCollapse = (inputTensorType.getRank() > 2);
+ 
+-    // MOLA opt #1: if molaPinReuseActivations marked this matmul, pin its LHS
++    // Tutticore opt #1: if tutticorePinReuseActivations marked this matmul, pin its LHS
+     // activation into L1 by tagging the (already-converted) LHS operand's
+-    // mola.memspace, which resolveMolaMemSpace honors during the layout below.
++    // tutticore.memspace, which resolveTutticoreMemSpace honors during the layout below.
+     // Done here — not at the producer — because conversion has remapped the
+     // value, and the matmul op (carrying the marker) is what survives to here.
+-    if (op->hasAttr("mola.lhs_l1") && !origInputs.empty()) {
++    if (op->hasAttr("tutticore.lhs_l1") && !origInputs.empty()) {
+       Value lhs = origInputs[0];
+       auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+       if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(lhs)) {
+         if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                 barg.getOwner()->getParentOp())) {
+-          fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
++          fn.setArgAttr(barg.getArgNumber(), "tutticore.memspace", l1);
+         }
+       } else if (mlir::Operation *def = lhs.getDefiningOp()) {
+-        def->setAttr("mola.memspace", l1);
++        def->setAttr("tutticore.memspace", l1);
+       }
+     }
+-    // MOLA local patch: honor the general `mola.in_l1` marker here too, not
+-    // just `mola.lhs_l1`. The elementwise rewriter already does this, but a
++    // Tutticore local patch: honor the general `tutticore.in_l1` marker here too, not
++    // just `tutticore.lhs_l1`. The elementwise rewriter already does this, but a
+     // matmul-heavy block (grouped-query attention) reaches L1 through THIS
+     // pattern, so a placement expressed on its operands was silently dropped:
+-    // measured 1212 mola.in_l1 tags on a GQA block producing byte-identical D2M
++    // measured 1212 tutticore.in_l1 tags on a GQA block producing byte-identical D2M
+     // (21760 L1 encodings, 13178 remote_load either way). Constants are skipped
+     // for the same reason as elsewhere -- placing a constant fill on this path
+     // degenerates the compute to a passthrough.
+-    if (op->hasAttr("mola.in_l1")) {
++    if (op->hasAttr("tutticore.in_l1")) {
+       auto l1 = mlir::StringAttr::get(op->getContext(), "l1");
+-      if (::getenv("MOLA_TT_PLACE_DEBUG"))
++      if (::getenv("TUTTICORE_TT_PLACE_DEBUG"))
+         llvm::errs() << "[matmul-in_l1] fired, " << origInputs.size()
+                      << " inputs\n";
+       for (Value in : origInputs) {
+-        if (molaRootsAtConstant(in)) {
+-          if (::getenv("MOLA_TT_PLACE_DEBUG"))
++        if (tutticoreRootsAtConstant(in)) {
++          if (::getenv("TUTTICORE_TT_PLACE_DEBUG"))
+             llvm::errs() << "[matmul-in_l1]   skip: roots at constant\n";
+           continue;
+         }
+-        if (::getenv("MOLA_TT_PLACE_DEBUG"))
++        if (::getenv("TUTTICORE_TT_PLACE_DEBUG"))
+           llvm::errs() << "[matmul-in_l1]   TAGGED\n";
+         if (auto barg = mlir::dyn_cast<mlir::BlockArgument>(in)) {
+           if (auto fn = mlir::dyn_cast_or_null<mlir::func::FuncOp>(
+                   barg.getOwner()->getParentOp())) {
+-            fn.setArgAttr(barg.getArgNumber(), "mola.memspace", l1);
++            fn.setArgAttr(barg.getArgNumber(), "tutticore.memspace", l1);
+           }
+         } else if (mlir::Operation *def = in.getDefiningOp()) {
+-          def->setAttr("mola.memspace", l1);
++          def->setAttr("tutticore.memspace", l1);
+         }
+       }
+     }
+@@ -3220,7 +3220,7 @@ public:
+         // row's size violates the NoC constraints, use the
+         // transpose-concat-transpose trick.
+         //
+-        // MOLA 2026-08-25 (second defect). The NoC-element test alone is not
++        // Tutticore 2026-08-25 (second defect). The NoC-element test alone is not
+         // sufficient here either. A width concat whose pieces are NoC-aligned
+         // but NOT TILE-aligned takes the plain row-major CompositeView path and
+         // returns garbage -- cat(x[..., :40], x[..., 40:]), an identity, comes
+@@ -3289,7 +3289,7 @@ public:
+         // -- and the row-major view that then stands in for it is not
+         // materialised correctly: Pythia's partially-rotated q (a 16|48
+         // concat of slices of a head-transposed QKV chunk) came back with
+-        // QK^T cosine 0.944. MOLA local patch 38 (2026-09-06).
++        // QK^T cosine 0.944. Tutticore local patch 38 (2026-09-06).
+         preTranspose->setAttr("decomposed", rewriter.getUnitAttr());
+ 
+         effectiveInputs.push_back(preTranspose.getResult());
+@@ -3561,7 +3561,7 @@ public:
+   }
+ };
+ 
+-// MOLA local patch (re-authored 2026-06-03, originally patch 08):
++// Tutticore local patch (re-authored 2026-06-03, originally patch 08):
+ // D2MConstantOpRewriter. Lowers ttir.constant (with DenseElementsAttr or
+ // DenseResourceElementsAttr value) to arith.constant + d2m.to_layout.
+ // Splat ttir.constants are canonicalized to ttir.full/zeros/ones earlier
+@@ -4686,7 +4686,7 @@ public:
+     auto origOutputs =
+         createDpsOutputs(op.getLoc(), rewriter, {op.getResult().getType()});
+ 
+-    // MOLA local patch 33 (2026-09-05): a reshape that re-partitions the
++    // Tutticore local patch 33 (2026-09-05): a reshape that re-partitions the
+     // innermost dimension into or out of an extent that is not a multiple of
+     // the tile width is miscompiled when its operand lives in DRAM -- the
+     // view's addresses are correct in every inspectable layer, but resolving
+@@ -4705,7 +4705,7 @@ public:
+     bool stageInputInL1 = false;
+     if constexpr (std::is_same_v<TensorManipulationOp, ttir::ReshapeOp>) {
+       stageInputInL1 = reshapeRepartitionsInnerDimUnaligned(op) &&
+-                       resolveMolaMemSpace(origInputs[0], memorySpaces[0]) ==
++                       resolveTutticoreMemSpace(origInputs[0], memorySpaces[0]) ==
+                            ttcore::MemorySpace::DeviceDRAM;
+     }
+ 
+@@ -4716,7 +4716,7 @@ public:
+           /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+       for (Value output : origOutputs) {
+         laidOut[1].push_back(createOptimalLayoutOp(
+-            output, resolveMolaMemSpace(output, memorySpaces[1]),
++            output, resolveTutticoreMemSpace(output, memorySpaces[1]),
+             /*tiled*/ info.canBeTilized, /*noCollapse*/ false, rewriter));
+       }
+     } else {
+@@ -4734,11 +4734,11 @@ public:
+     // result layout therefore takes the *input's* memory space, NOT the DPS
+     // output's — consistent with D2MPermuteRewriter (inputLayout.
+     // getMemorySpace()). When default-input-memspace != default-output-
+-    // memspace (MOLA's dram-input/l1-output split, or a per-tensor
+-    // mola.memspace), the DPS output sits in the output space while the
++    // memspace (Tutticore's dram-input/l1-output split, or a per-tensor
++    // tutticore.memspace), the DPS output sits in the output space while the
+     // input/view sits in the input space; using the output space built a
+     // memspace-crossing view that ICE'd real-weight QKV (transpose+reshape on
+-    // a 2048-wide weight). (MOLA local patch 2026-06-03.)
++    // a 2048-wide weight). (Tutticore local patch 2026-06-03.)
+     auto inLayout = mlir::cast<ttcore::MetalLayoutAttr>(
+         mlir::cast<RankedTensorType>(inputs[0].getType()).getEncoding());
+     auto newLayout = ttcore::MetalLayoutAttr::get(
+@@ -4907,7 +4907,7 @@ static TensorManipulationInfo permuteLogicalInfo(ttir::PermuteOp op) {
+   // concat rewriter's H/W pre-transpose folded with a head transpose into
+   // [0, 2, 3, 1] at conversion time, and Pythia's partially-rotated q came
+   // back scrambled (QK^T cosine 0.944; a lone [1, 2, 0, 3, 4] permute reads
+-  // 0.08). MOLA local patch 38 (2026-09-06).
++  // 0.08). Tutticore local patch 38 (2026-09-06).
+   SmallVector<AffineExpr> results(logicalRank);
+   for (auto [dstIdx, srcIdx] : llvm::enumerate(permutation)) {
+     results[srcIdx] = mlir::getAffineDimExpr(dstIdx, ctx);
+@@ -5055,7 +5055,7 @@ public:
+ 
+     // Assume all shards in L1 already start at aligned addresses.
+     //
+-    // MOLA 2026-08-25: the WIDTH predicate must ALSO require TILE alignment, not
++    // Tutticore 2026-08-25: the WIDTH predicate must ALSO require TILE alignment, not
+     // just NoC-element alignment. Declaring a width slice "NoC friendly" makes
+     // this pattern return failure() below and hands the slice to the default
+     // lowering, which needs the start offset on a tile boundary. For bf16
+@@ -5115,7 +5115,7 @@ public:
+       // non-tile-aligned start over a DRAM operand, which reads the row
+       // start truncated to a 32-element granule: cat(q[..., 8:16], q[..., :8])
+       // for q = x[..., :64].transpose(1, 2) returned cat(q[..., :8],
+-      // q[..., :8]) (cosine 0.49). MOLA local patch 38 (2026-09-06).
++      // q[..., :8]) (cosine 0.49). Tutticore local patch 38 (2026-09-06).
+       preTranspose->setAttr("decomposed", rewriter.getUnitAttr());
+ 
+       // Transpose the slice spec.
+@@ -5915,7 +5915,7 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
+   patterns.add<D2MEmptyOpRewriter>(typeConverter, ctx);
+ 
+   // Non-splat constant (real weights via dense_resource) -> arith.constant
+-  // + d2m.to_layout (MOLA re-authored patch 08).
++  // + d2m.to_layout (Tutticore re-authored patch 08).
+   patterns.add<D2MConstantOpRewriter>(typeConverter, ctx);
+ 
+   // Mesh ops 1:1 conversion.
+@@ -5952,23 +5952,23 @@ void populateTTIRToD2MPatterns(MLIRContext *ctx, RewritePatternSet &patterns,
+ 
+ namespace {
+ 
+-// MOLA opt #1 (MOLA_TT_L1_PIN_REUSE) + opt #2 (MOLA_TT_FUSE_DRAM): L1-pin
++// Tutticore opt #1 (TUTTICORE_TT_L1_PIN_REUSE) + opt #2 (TUTTICORE_TT_FUSE_DRAM): L1-pin
+ // matmul-input activations (LHS, reused) and/or matmul-output intermediates
+-// (round-trips), tagged via the `mola.memspace="l1"` attr that resolveMolaMemSpace
++// (round-trips), tagged via the `tutticore.memspace="l1"` attr that resolveTutticoreMemSpace
+ // honors. Candidates ranked by DRAM bytes saved (input: #matmuls-as-LHS*bytes;
+ // output: 2*bytes for the write+read round-trip) and greedily packed into a
+ // SHARED reserved L1 budget so input+output pinning don't overflow. The matmul
+-// ops are marked (mola.lhs_l1 / mola.out_l1); the matmul rewriter propagates L1
++// ops are marked (tutticore.lhs_l1 / tutticore.out_l1); the matmul rewriter propagates L1
+ // onto the adapted operands at layout time — tagging producer values here would
+ // be lost to dialect-conversion remapping for intermediates.
+-static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+-  // MOLA now owns this placement DECISION (lifted into mola::molaPlaceTTActivations,
+-  // lib/Conversion/MolaTTPlace.cpp, run by TTBackend before this pipeline). When
+-  // MOLA has already decided (it stamps `mola.placement_done` and sets the same
+-  // mola.lhs_l1 / mola.in_l1 tags this function would), skip — the fork is pure
+-  // REALIZATION (resolveMolaMemSpace honors the tags below). This legacy in-line
+-  // mirror is retained only for fork-standalone / non-MOLA callers.
+-  if (module->hasAttr("mola.placement_done")) {
++static void tutticorePinActivations(ModuleOp module, MLIRContext *ctx) {
++  // Tutticore now owns this placement DECISION (lifted into tutticore::tutticorePlaceTTActivations,
++  // lib/Conversion/TutticoreTTPlace.cpp, run by TTBackend before this pipeline). When
++  // Tutticore has already decided (it stamps `tutticore.placement_done` and sets the same
++  // tutticore.lhs_l1 / tutticore.in_l1 tags this function would), skip — the fork is pure
++  // REALIZATION (resolveTutticoreMemSpace honors the tags below). This legacy in-line
++  // mirror is retained only for fork-standalone / non-Tutticore callers.
++  if (module->hasAttr("tutticore.placement_done")) {
+     return;
+   }
+   // DEFAULT ON (2026-06-08): both memory-orchestration optimizations are on by
+@@ -5976,24 +5976,24 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+   // staying decode-exact, and are budget-bounded (candidates that don't fit L1
+   // are skipped, never overflow). Opt out per-optimization with =0.
+   const bool pinInput = [] {
+-    const char *e = ::getenv("MOLA_TT_L1_PIN_REUSE");
++    const char *e = ::getenv("TUTTICORE_TT_L1_PIN_REUSE");
+     return !(e && e[0] == '0');
+   }();
+   const bool pinOutput = [] {
+-    const char *e = ::getenv("MOLA_TT_FUSE_DRAM");
++    const char *e = ::getenv("TUTTICORE_TT_FUSE_DRAM");
+     return !(e && e[0] == '0');
+   }();
+   if (!pinInput && !pinOutput) {
+     return;
+   }
+-  // TRAFFIC objective (mirror of mola::costPromoteTraffic in
+-  // include/mola/Backends/CostFormula.h). Staging a reused / mcast-re-read /
++  // TRAFFIC objective (mirror of tutticore::costPromoteTraffic in
++  // include/tutticore/Backends/CostFormula.h). Staging a reused / mcast-re-read /
+   // round-trip operand into on-chip L1 offloads DRAM regardless of dispatch
+   // time — which is exactly why the TIME cost model
+   // (BaselineCostModel::shouldPromoteToTier, used on NVGPU + tt-ttnn) REJECTS
+   // these on dispatch-bound Blackhole (200us dispatch >> transfer) while the
+   // TRAFFIC objective accepts. The budget is the REAL usable L1 (system
+-  // descriptor); the mola.target shared.capacity_bytes only TIGHTENS it (min),
++  // descriptor); the tutticore.target shared.capacity_bytes only TIGHTENS it (min),
+   // so a capacity sweep drives TT placement (spec-sensitivity) while pins never
+   // exceed real L1 — and at the default spec (= real L1) the result is
+   // unchanged. See docs/plans/g1-cost-model-reconciliation-2026-06-09.md.
+@@ -6006,7 +6006,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+   }
+   int64_t specCap = 0;
+   double bwGlobal = 0.0, bwDest = 0.0;
+-  if (auto tgt = module->getAttrOfType<DictionaryAttr>("mola.target")) {
++  if (auto tgt = module->getAttrOfType<DictionaryAttr>("tutticore.target")) {
+     if (auto tiers = dyn_cast_or_null<DictionaryAttr>(tgt.get("tiers"))) {
+       if (auto sh = dyn_cast_or_null<DictionaryAttr>(tiers.get("shared"))) {
+         if (auto cap = dyn_cast_or_null<IntegerAttr>(sh.get("capacity_bytes"))) {
+@@ -6054,7 +6054,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+     return;
+   }
+   const int64_t reservePct = [] {
+-    const char *p = ::getenv("MOLA_TT_L1_PIN_RESERVE_PCT");
++    const char *p = ::getenv("TUTTICORE_TT_L1_PIN_RESERVE_PCT");
+     return static_cast<int64_t>(p ? atoi(p) : 50);
+   }();
+   auto tensorBytes = [](RankedTensorType rt) -> int64_t {
+@@ -6077,7 +6077,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+     llvm::MapVector<Value, llvm::SmallVector<Operation *>> lhsToMatmuls;
+     module.walk([&](ttir::MatmulOp mm) {
+       // operand 0 is the activation (LHS); skip if it roots at a constant.
+-      if (!molaRootsAtConstant(mm->getOperand(0))) {
++      if (!tutticoreRootsAtConstant(mm->getOperand(0))) {
+         lhsToMatmuls[mm->getOperand(0)].push_back(mm);
+       }
+     });
+@@ -6095,7 +6095,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+   // (elementwise: add/mul/silu in SwiGLU + residual). Matmul outputs are
+   // already L1 and matmul-consumed intermediates are handled by opt #1, so the
+   // remaining DRAM round-trips are elementwise-consumed transients. Keep them in
+-  // L1 by marking the CONSUMER op (mola.in_l1); the elementwise rewriter pins
++  // L1 by marking the CONSUMER op (tutticore.in_l1); the elementwise rewriter pins
+   // its inputs. Benefit = 2*bytes (write+read round-trip saved).
+   if (pinOutput) {
+     llvm::MapVector<Value, llvm::SmallVector<Operation *>> interToConsumers;
+@@ -6107,7 +6107,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+         if (!in.getDefiningOp()) {
+           continue; // arg, not an intermediate
+         }
+-        if (molaRootsAtConstant(in)) {
++        if (tutticoreRootsAtConstant(in)) {
+           continue; // constant/weight — pinning it would miscompile
+         }
+         auto rt = dyn_cast<RankedTensorType>(in.getType());
+@@ -6135,7 +6135,7 @@ static void molaPinActivations(ModuleOp module, MLIRContext *ctx) {
+       continue;
+     }
+     used += c.bytes;
+-    StringRef marker = c.isOutput ? "mola.in_l1" : "mola.lhs_l1";
++    StringRef marker = c.isOutput ? "tutticore.in_l1" : "tutticore.lhs_l1";
+     for (Operation *mm : c.matmuls) {
+       mm->setAttr(marker, UnitAttr::get(ctx));
+     }
+@@ -6171,19 +6171,19 @@ public:
+     MLIRContext *ctx = &getContext();
+     ModuleOp module = getOperation();
+ 
+-    // MOLA reuse-aware L1 pinning of matmul-input activations (opt #1,
++    // Tutticore reuse-aware L1 pinning of matmul-input activations (opt #1,
+     // 2026-06-08). Upstream stages every activation in DRAM; each matmul then
+     // mcast-re-reads its LHS activation from DRAM across the output tile grid.
+-    // MOLA pins matmul-LHS activations (args AND intermediates — e.g. the
++    // Tutticore pins matmul-LHS activations (args AND intermediates — e.g. the
+     // rms-normed activation feeding Q/K/V) into L1 so the contraction reads
+     // them from L1, cutting DRAM activation traffic. Done HERE, at the very
+-    // start of TTIRToD2M, so the `mola.memspace` tags land on STABLE ops and
+-    // are honored by resolveMolaMemSpace below — tagging earlier (in TTBackend,
++    // start of TTIRToD2M, so the `tutticore.memspace` tags land on STABLE ops and
++    // are honored by resolveTutticoreMemSpace below — tagging earlier (in TTBackend,
+     // before the TTIR rewrites) loses intermediate tags. Ranked by (#matmuls
+     // using it as LHS)*bytes; greedily pinned within a reserved L1 budget
+-    // (default 50%, MOLA_TT_L1_PIN_RESERVE_PCT). Weights (matmul RHS) are never
+-    // candidates. Gated MOLA_TT_L1_PIN_REUSE=1.
+-    molaPinActivations(module, ctx);
++    // (default 50%, TUTTICORE_TT_L1_PIN_RESERVE_PCT). Weights (matmul RHS) are never
++    // candidates. Gated TUTTICORE_TT_L1_PIN_REUSE=1.
++    tutticorePinActivations(module, ctx);
+ 
+     TypeConverter typeConverter;
+     typeConverter.addConversion([](Type t) { return t; });
+diff --git a/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp b/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
+index 92987f2..9ce9a6f 100644
+--- a/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
++++ b/lib/Conversion/TTIRToTTIRDecomposition/TTIRToTTIRDecomposition.cpp
+@@ -303,18 +303,18 @@ struct DotGeneralToMatmulConversionPattern
+           lhsMatmulInput, rhsMatmulInput);
+     }
+ 
+-    // REALIZATION: carry MOLA's placement intent (mola.lhs_l1 etc., set by
+-    // mola::molaPlaceTTActivations on the pre-decomposition dot_general) onto the
+-    // matmul this op lowers to, so resolveMolaMemSpace honors MOLA's L1 decision.
+-    // The decision is MOLA's; the backend just preserves+realizes it.
++    // REALIZATION: carry Tutticore's placement intent (tutticore.lhs_l1 etc., set by
++    // tutticore::tutticorePlaceTTActivations on the pre-decomposition dot_general) onto the
++    // matmul this op lowers to, so resolveTutticoreMemSpace honors Tutticore's L1 decision.
++    // The decision is Tutticore's; the backend just preserves+realizes it.
+     // Re-ported 2026-08-24: upstream refactored this to build EITHER a
+     // MultiplyOp or a MatmulOp into the `contractionResult` Value, so the old
+     // `matmulOp` handle no longer exists. Tag whichever op actually defines the
+-    // contraction -- the intent is "carry mola.* onto the op this lowers to",
++    // contraction -- the intent is "carry tutticore.* onto the op this lowers to",
+     // which is the defining op in both branches.
+     if (mlir::Operation *contractionOp = contractionResult.getDefiningOp()) {
+       for (mlir::NamedAttribute na : op->getAttrs()) {
+-        if (na.getName().strref().starts_with("mola.")) {
++        if (na.getName().strref().starts_with("tutticore.")) {
+           contractionOp->setAttr(na.getName(), na.getValue());
+         }
+       }
+diff --git a/lib/Dialect/D2M/Analysis/GridAnalysis.cpp b/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
+index 59439b3..f60babb 100644
+--- a/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
++++ b/lib/Dialect/D2M/Analysis/GridAnalysis.cpp
+@@ -377,7 +377,7 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
+   return inputInfos;
+ }
+ 
+-// (MOLA, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
++// (Tutticore, 2026-09-06) Along a reduction axis, take the FEWEST streamed blocks
+ // whose double-buffered shard fits the budget, not the most.
+ //
+ // A reduction axis is not parallel work: splitting it into virtual cores only
+@@ -386,12 +386,12 @@ computeCompositeInputGridInfos(d2m::CompositeViewOp compositeView,
+ // through the unpacker, which holds an f32 tile as Tf32 -- 13 mantissa bits
+ // truncated on every reload. Streamed one tile per block, a 768-wide f32 sum
+ // came out 0.47% low on Blackhole and a sum of exact ones exact; the same
+-// sum inside one block is exact (MOLA experiments/tt/probes/normbias/,
++// sum inside one block is exact (Tutticore experiments/tt/probes/normbias/,
+ // reduce_sum_uniform_768 / reduce_sum_ones_768). That truncation is the
+ // LayerNorm-low / RMSNorm-high magnitude error of the whole model corpus.
+ //
+ // Only input operands and only tiled ones are touched; the split must still
+-// map onto a legal physical grid. MOLA_TT_D2M_REDUCTION_SPLIT=stream restores
++// map onto a legal physical grid. TUTTICORE_TT_D2M_REDUCTION_SPLIT=stream restores
+ // the upstream choice for an A/B.
+ // `budgetGrid` is the grid the shard is budgeted against: the operand's own
+ // grid with every dim the output also indexes replaced by the output's grid
+@@ -737,7 +737,7 @@ GridAnalysis::GridAnalysis(Operation *moduleOp,
+     : deviceGridShape(deviceGridShape), ttnnMode(ttnnMode) {
+   // A third of usable L1 for one operand's double-buffered reduction shard:
+   // the input stream, its scaler and the output must still all fit.
+-  const char *reductionSplit = std::getenv("MOLA_TT_D2M_REDUCTION_SPLIT");
++  const char *reductionSplit = std::getenv("TUTTICORE_TT_D2M_REDUCTION_SPLIT");
+   if (!(reductionSplit && llvm::StringRef(reductionSplit) == "stream")) {
+     if (ttcore::SystemDescAttr systemDesc =
+             ttcore::getCurrentScopeSystemDesc(moduleOp)) {
+diff --git a/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp b/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
+index 8b81d37..e252a22 100644
+--- a/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
++++ b/lib/Dialect/D2M/IR/D2MGenericRegionOps.cpp
+@@ -2334,15 +2334,15 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
+   // Float multiplies run on the SFPU (both operands staged in DST), not the
+   // FPU's ELWMUL: on Blackhole the FPU bf16 x bf16 product differs from the
+   // round-to-nearest-even result on ~28% of elements (relative error up to
+-  // 1e-2, measured 2026-09-05 on random operands, MOLA
++  // 1e-2, measured 2026-09-05 on random operands, Tutticore
+   // experiments/tt/probes/qwen/bf16_mul.py) even with HiFi4 configured,
+   // while the SFPU mul_binary_tile is exact -- which is also what TTNN's
+   // binary_ng uses for bf16 multiply. Add/sub stay on the FPU: their FPU
+   // results match TTNN's exactly. Must agree with classifyComputeOp in
+   // Utils/DstRegisterAnalysis.cpp (DST capacity is sized by the same class).
+-  // MOLA_TT_D2M_SFPU_MUL=0 restores the FPU multiply for an A/B; the
++  // TUTTICORE_TT_D2M_SFPU_MUL=0 restores the FPU multiply for an A/B; the
+   // classifier in DstRegisterAnalysis.cpp reads the same switch.
+-  const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
++  const char *sfpuMulSwitch = std::getenv("TUTTICORE_TT_D2M_SFPU_MUL");
+   const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+   // Broadcast operands included (2026-09-06). Patch 34 kept a multiply with
+   // a broadcast operand on the FPU because the SFPU path computed
+@@ -2353,7 +2353,7 @@ SmallVector<int64_t> TileMulOp::getOperandsLoadFromDstRegister() {
+   // landing inside the other operand's slots. buildIndices now takes the
+   // pitch from the whole compute nest, and that probe is bit-identical to
+   // TTNN on the SFPU. The FPU broadcast product is 0.088% high on bf16
+-  // (MOLA experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
++  // (Tutticore experiments/tt/probes/normbias/bcast_mul_bf16), so nothing
+   // float stays there.
+   auto lhsType = getOperand(0).getType();
+   if (sfpuMul && mlir::isa<mlir::tt::ttcore::TileType>(lhsType) &&
+diff --git a/lib/Dialect/D2M/IR/D2MOps.cpp b/lib/Dialect/D2M/IR/D2MOps.cpp
+index 98485b9..eaafed8 100644
+--- a/lib/Dialect/D2M/IR/D2MOps.cpp
++++ b/lib/Dialect/D2M/IR/D2MOps.cpp
+@@ -1217,7 +1217,7 @@ mlir::LogicalResult d2m::ViewLayoutOp::bufferize(
+   auto newOp = rewriter.create<d2m::ViewLayoutOp>(getLoc(), outMemrefType,
+                                                   *maybeInput, getRemapping(),
+                                                   getReinterpretLayout());
+-  // (MOLA #1726: a mark LowerToLayout set, d2m.view_pads, stays on the view)
++  // (Tutticore #1726: a mark LowerToLayout set, d2m.view_pads, stays on the view)
+   newOp->setDiscardableAttrs(getOperation()->getDiscardableAttrDictionary());
+ 
+   mlir::bufferization::replaceOpWithBufferizedValues(rewriter, *this,
+@@ -2822,7 +2822,7 @@ FailureOr<d2m::ParallelizedGeneric> d2m::GenericOp::withParallelization(
+         return failure();
+       }
+       auto operandType = mlir::cast<ShapedType>(operand.get().getType());
+-      // (MOLA) Ask before reblocking. reblockShapedType asserts that each new
++      // (Tutticore) Ask before reblocking. reblockShapedType asserts that each new
+       // grid dimension divides the operand's tile count exactly -- a ShapedType
+       // carries one shard shape for every core and cannot express an uneven
+       // split -- and that assert ABORTS the process.
+diff --git a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+index 5ed7725..fba2f72 100644
+--- a/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
++++ b/lib/Dialect/D2M/Pipelines/D2MPipelines.cpp
+@@ -90,9 +90,9 @@ void createD2MFrontendPipeline(OpPassManager &pm,
+   pm.addPass(ttir::createTTIRDecomposeComposites());
+   pm.addPass(tt::createTTIRToTTIRDecompositionPass());
+   pm.addPass(ttir::createTTIRExplicateTMs());
+-  // MOLA: EraseInverseOps loops forever on the where->lerp mask form;
++  // Tutticore: EraseInverseOps loops forever on the where->lerp mask form;
+   // skip when mask const-eval is on.
+-  if (![]{const char*e=::getenv("MOLA_TT_MASK_EVAL");return e&&e[0]=='1';}())
++  if (![]{const char*e=::getenv("TUTTICORE_TT_MASK_EVAL");return e&&e[0]=='1';}())
+     pm.addPass(ttir::createTTIREraseInverseOps());
+   pm.addPass(ttir::createTTIRMoveReshapeToConstant());
+   pm.addPass(ttir::createTTIRFoldConstantReshapeBroadcast());
+@@ -115,17 +115,17 @@ void createD2MFrontendPipeline(OpPassManager &pm,
+     toD2MOptions.enableMulticastInference = options.enableMulticastInference;
+   }
+   pm.addPass(tt::createTTIRToD2MPass(toD2MOptions));
+-  // MOLA local hook (2026-05-12): run an out-of-tree per-tensor placement
++  // Tutticore local hook (2026-05-12): run an out-of-tree per-tensor placement
+   // policy right after ttir-to-d2m (tensors now carry MetalLayoutAttr
+   // memory_space) and before grid-selection / allocate. The named pass
+   // resolves from the global pass registry at runtime (registered by the
+-  // MOLA driver). No-op when the option is empty.
+-  if (!options.molaPlacementPipeline.empty()) {
+-    if (mlir::failed(mlir::parsePassPipeline(options.molaPlacementPipeline, pm,
++  // Tutticore driver). No-op when the option is empty.
++  if (!options.tutticorePlacementPipeline.empty()) {
++    if (mlir::failed(mlir::parsePassPipeline(options.tutticorePlacementPipeline, pm,
+                                              llvm::errs()))) {
+       llvm::errs() << "createD2MFrontendPipeline: failed to parse "
+-                      "mola-placement-pipeline='"
+-                   << options.molaPlacementPipeline << "'\n";
++                      "tutticore-placement-pipeline='"
++                   << options.tutticorePlacementPipeline << "'\n";
+     }
+   }
+   pm.addPass(d2m::createD2MScalarizeConstTensors());
+diff --git a/lib/Dialect/D2M/Transforms/Allocate.cpp b/lib/Dialect/D2M/Transforms/Allocate.cpp
+index 2ad15f9..316efdc 100644
+--- a/lib/Dialect/D2M/Transforms/Allocate.cpp
++++ b/lib/Dialect/D2M/Transforms/Allocate.cpp
+@@ -574,7 +574,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+ 
+         Operation *firstOp = li->getStartOperation(result);
+         Operation *lastOp = li->getEndOperation(result, firstOp);
+-        // MOLA local patch (2026-06-08, ROOT-CAUSED, now DEFAULT-ON): top-level
++        // Tutticore local patch (2026-06-08, ROOT-CAUSED, now DEFAULT-ON): top-level
+         // staged-buffer ADDRESS REUSE corrupts re-dispatch (decode). A parallel
+         // matmul's output buffer (e.g. g in g*u) is reused/clobbered by the
+         // sibling (u) when buffer pressure forces address recycling, so on the
+@@ -585,9 +585,9 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+         // mostly DRAM (plentiful) so it does NOT pressure L1. Result: the full
+         // dim=2048 Llama block decodes bf16-exact on EVERY dispatch (0.99990
+         // x5; vs ~0 corrupt before) — single forward pass unaffected.
+-        // MOLA_TT_ALLOC_REUSE=1 restores upstream reuse (single-dispatch only).
++        // TUTTICORE_TT_ALLOC_REUSE=1 restores upstream reuse (single-dispatch only).
+         static const bool noReuse = [] {
+-          const char *e = ::getenv("MOLA_TT_ALLOC_REUSE");
++          const char *e = ::getenv("TUTTICORE_TT_ALLOC_REUSE");
+           return !(e && e[0] == '1');
+         }();
+         if (noReuse) {
+@@ -615,7 +615,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+       closure.live.last = i->second;
+     }
+ 
+-    // MOLA local patch 40 (2026-09-06): visit the graph in program order, not
++    // Tutticore local patch 40 (2026-09-06): visit the graph in program order, not
+     // in DenseMap order. The loop below inserts every alloc into
+     // `analysis.memrefs`, a MapVector, so the allocator's whole packing order
+     // followed the hash of Operation pointers and therefore the process's
+@@ -676,7 +676,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+ 
+     TT_ALLOC_DEBUG("collected {} memref context(s)", analysis.memrefs.size());
+ 
+-    // MOLA local patch 40 (2026-09-06): the order in which the planner sees
++    // Tutticore local patch 40 (2026-09-06): the order in which the planner sees
+     // these contexts is its packing tie-break, and the packing result depends
+     // on it. Upstream left it to DenseMap iteration, i.e. to the hash of
+     // Operation pointers, so the same bloom-560m input reported a required
+@@ -684,11 +684,11 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+     // (with ASLR off, always the former), and the model fitted or fell back
+     // depending on the run. The default here is L1 size descending with
+     // program order for ties (first-fit-decreasing), which fits bloom where
+-    // plain program order does not. MOLA_TT_D2M_ALLOC_ORDER selects another
++    // plain program order does not. TUTTICORE_TT_D2M_ALLOC_ORDER selects another
+     // deterministic policy for an A/B: program, reverse, size, last (last use
+     // descending), span (live range length descending).
+     {
+-      const char *policy = ::getenv("MOLA_TT_D2M_ALLOC_ORDER");
++      const char *policy = ::getenv("TUTTICORE_TT_D2M_ALLOC_ORDER");
+       llvm::StringRef pol = (policy && policy[0]) ? policy : "size";
+       llvm::SmallVector<std::pair<mlir::Value, MemrefValueContext>> entries(
+           analysis.memrefs.begin(), analysis.memrefs.end());
+@@ -740,7 +740,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+     Block &funcBody = funcOp.getBody().front();
+     const auto &L1memInfo = memSpaces[ordinal(MemorySpace::DeviceL1)];
+ 
+-    // MOLA local patch (2026-06-08, #126): per-function auto-decision for
++    // Tutticore local patch (2026-06-08, #126): per-function auto-decision for
+     // disjoint combiner CBs. The iters>=2 in-process re-dispatch corruption is
+     // caused by data-INDEPENDENT combiner generics (matmul/mul/add with >=2
+     // inputs) reusing the same per-core CB-scratch L1 addresses; on re-dispatch
+@@ -761,7 +761,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+     //       grid<=39, and every component, grid<=8, want disjoint).
+     // Single self-selecting policy: maximal CB isolation when it fits L1 and the
+     // device is under-occupied (concurrency is real); windowed reuse when the
+-    // grid is saturated (siblings serialize). Override with MOLA_TT_CB_
++    // grid is saturated (siblings serialize). Override with TUTTICORE_TT_CB_
+     // COMBINER_DISJOINT (0=force off, 1=force on); default = auto.
+     auto alignedAllocBytes = [&](memref::AllocOp allocOp,
+                                  int32_t numBuffers) -> AllocSizeT {
+@@ -802,10 +802,10 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+     });
+     const AllocSizeT l1Capacity = L1memInfo.maxAddress - L1memInfo.baseAddress;
+     // Fraction of L1 the disjoint combiner set may occupy, leaving room for the
+-    // non-combiner working set + staging. Tunable via MOLA_TT_CB_DISJOINT_FRAC
++    // non-combiner working set + staging. Tunable via TUTTICORE_TT_CB_DISJOINT_FRAC
+     // (percent). Default 50%.
+     const AllocSizeT disjointFracPct = [] {
+-      const char *p = ::getenv("MOLA_TT_CB_DISJOINT_FRAC");
++      const char *p = ::getenv("TUTTICORE_TT_CB_DISJOINT_FRAC");
+       return static_cast<AllocSizeT>(p ? atoi(p) : 50);
+     }();
+     // Max combiner GRID OCCUPANCY (Tensix cores spanned) for which whole-program
+@@ -819,9 +819,9 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+     // isolates them — whole-program ranges then only disturb the dense layout.
+     // Measured: components grid<=8, dim=256 block grid<=39 (both need disjoint);
+     // dim=2048 block grid 65-91 (needs window-64). Threshold 48 splits them.
+-    // Tunable via MOLA_TT_CB_DISJOINT_MAXGRID (default 48).
++    // Tunable via TUTTICORE_TT_CB_DISJOINT_MAXGRID (default 48).
+     const int64_t disjointMaxGrid = [] {
+-      const char *m = ::getenv("MOLA_TT_CB_DISJOINT_MAXGRID");
++      const char *m = ::getenv("TUTTICORE_TT_CB_DISJOINT_MAXGRID");
+       return static_cast<int64_t>(m ? atoi(m) : 48);
+     }();
+     const SequenceT funcMaxPos =
+@@ -831,7 +831,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+         combinerFootprint <= (l1Capacity * disjointFracPct) / 100 &&
+         maxCombinerGridVol <= disjointMaxGrid;
+     const bool combinerDisjoint = [&] {
+-      const char *e = ::getenv("MOLA_TT_CB_COMBINER_DISJOINT");
++      const char *e = ::getenv("TUTTICORE_TT_CB_COMBINER_DISJOINT");
+       if (e && e[0] == '0') {
+         return false;
+       }
+@@ -840,8 +840,8 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+       }
+       return combinerDisjointAuto;
+     }();
+-    if (::getenv("MOLA_TT_DUMP_MAXPOS")) {
+-      llvm::errs() << "MOLA CB: combinerFootprint=" << combinerFootprint
++    if (::getenv("TUTTICORE_TT_DUMP_MAXPOS")) {
++      llvm::errs() << "Tutticore CB: combinerFootprint=" << combinerFootprint
+                    << " l1Capacity=" << l1Capacity << " maxPos=" << funcMaxPos
+                    << " maxCombinerGrid=" << maxCombinerGridVol
+                    << " auto=" << combinerDisjointAuto
+@@ -870,7 +870,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+               allocOp->getAttrOfType<IntegerAttr>("d2m.synchronized_buffer")
+                   .getInt();
+         } else if (allocOp->getAttr("d2m.blocking_map")) {
+-          // (MOLA patch) Elementwise-fusion intermediate. GenericFusion tags the
++          // (Tutticore patch) Elementwise-fusion intermediate. GenericFusion tags the
+           // producer->consumer handoff buffer inside a fused generic with
+           // d2m.blocking_map (see GenericFusion.cpp: "intermediate buffers that
+           // have no associated generic operand"); InsertScratchBuffers moves the
+@@ -894,14 +894,14 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+               addMemrefValueContext(rewriter, analysis, allocOp.getResult(),
+                                     allocOp.getType(), device);
+           ctx.live = {genericSeqPos, genericSeqPos};
+-          // MOLA local patch (2026-06-07): CB scratch reuses identical L1
++          // Tutticore local patch (2026-06-07): CB scratch reuses identical L1
+           // addresses across data-INDEPENDENT generics in the same program;
+           // overlapping execution clobbers the protocol (multi-branch
+           // matmuls). Default to whole-program CB live-ranges so each
+-          // generic gets disjoint CBs. Opt out: MOLA_TT_CB_REUSE=1.
++          // generic gets disjoint CBs. Opt out: TUTTICORE_TT_CB_REUSE=1.
+           {
+             static const bool cbNoReuse = [] {
+-              const char *e = ::getenv("MOLA_TT_CB_REUSE");
++              const char *e = ::getenv("TUTTICORE_TT_CB_REUSE");
+               return !(e && e[0] == '1');
+             }();
+             if (cbNoReuse) {
+@@ -909,7 +909,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+               // sliding window covers data-independent fanout (parallel
+               // branches dispatch adjacently) while letting far-apart
+               // generics reuse. Window in sequence positions; default 64
+-              // (~4 generics), MOLA_TT_CB_WINDOW overrides.
++              // (~4 generics), TUTTICORE_TT_CB_WINDOW overrides.
+               //
+               // Combiner-disjoint policy (see analyzeGenericRegionAllocs head):
+               // non-combiners ALWAYS use the protective window (default 64) so
+@@ -920,7 +920,7 @@ class D2MAllocate final : public impl::D2MAllocateBase<D2MAllocate> {
+               // fixture that fits L1 (all components) and falls back to windowed
+               // reuse on the dim=2048 block (already decode-exact that way).
+               static const SequenceT win = [] {
+-                const char *w = ::getenv("MOLA_TT_CB_WINDOW");
++                const char *w = ::getenv("TUTTICORE_TT_CB_WINDOW");
+                 return static_cast<SequenceT>(w ? atoi(w) : 64);
+               }();
+               SequenceT maxPos = static_cast<SequenceT>(
+diff --git a/lib/Dialect/D2M/Transforms/GridSelection.cpp b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+index 6c25bb9..6e79424 100644
+--- a/lib/Dialect/D2M/Transforms/GridSelection.cpp
++++ b/lib/Dialect/D2M/Transforms/GridSelection.cpp
+@@ -99,7 +99,7 @@ static void recordGenericConsumer(Operation *user,
+   }
+ 
+   if (!useGeneric) {
+-    // (MOLA diagnostic) name the op that violates the invariant -- the bare
++    // (Tutticore diagnostic) name the op that violates the invariant -- the bare
+     // assertion says only that one exists, which is not enough to fix it.
+     llvm::errs() << "[grid-selection] ToLayout consumer is not a Generic: '"
+                  << user->getName().getStringRef() << "'\n  consumer : " << *user
+@@ -220,7 +220,7 @@ optimizeToLayoutGrid(d2m::ToLayoutOp toLayoutOp, ArrayRef<int64_t> targetGrid,
+   RankedTensorType newTensorType = utils::tensorWithOptimalGrid(
+       outputType, ttnnMode, optimalGrid, paddingTileShape);
+ 
+-  // (MOLA) Decline a grid this tensor cannot be reblocked back from.
++  // (Tutticore) Decline a grid this tensor cannot be reblocked back from.
+   //
+   // Below, the optimal-grid tensor is reblocked to the ORIGINAL grid to keep the
+   // view chain well formed. reblockShapedType asserts that each new grid
+@@ -328,7 +328,7 @@ static void insertViewForTTNNDRAMTensor(Value operand,
+   AffineMap reblockMap = ttmlir::utils::calculateReblockMap(
+       unShardedShapeWithGrid, fakeShardedShape, builder.getContext());
+ 
+-  // MOLA local patch (2026-06-07): Interleaved is only correct for the
++  // Tutticore local patch (2026-06-07): Interleaved is only correct for the
+   // single-core (1x1) distribution. For a multicore optimalGrid the view
+   // output must be Sharded so address derivation goes through the
+   // ShardLayout/coreVirtMap path (proven exact for arg-fed DRAM-sharded at
+@@ -368,7 +368,7 @@ optimizeTTNNMetalLayoutCastOpGrid(ttir::TTNNMetalLayoutCastOp castOp,
+     return;
+   }
+ 
+-  // (MOLA) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
++  // (Tutticore) Same precondition as in optimizeToLayoutGrid: reblocking asserts on
+   // an inexact split and that assert aborts the compiler. Decline rather than
+   // die; the op keeps the grid it already has.
+   if (!utils::canReblockShapedType(outputType, optimalGrid)) {
+@@ -1025,7 +1025,7 @@ public:
+       return;
+       }
+ 
+-    // MOLA local patch (2026-06-07): cross-generic producer/consumer grid
++    // Tutticore local patch (2026-06-07): cross-generic producer/consumer grid
+     // harmonization. Each generic's grids are anchored on its own output,
+     // so a single-use staging producer (constant fill, get_global tilize)
+     // can land on a different grid than its consumer's operand — the same
+diff --git a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
+index a664e3c..9e66697 100644
+--- a/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
++++ b/lib/Dialect/D2M/Transforms/InsertDstRegisterAccess/Shared.cpp
+@@ -519,7 +519,7 @@ bool allTileMatmulOutputsSupportPackerL1Acc(Operation *loopOp) {
+ }
+ 
+ bool isPackerL1AccReduceOnlyLoop(Operation *loopOp) {
+-  if (const char *sw = std::getenv("MOLA_TT_D2M_REDUCE_L1_ACC");
++  if (const char *sw = std::getenv("TUTTICORE_TT_D2M_REDUCE_L1_ACC");
+       sw && sw[0] == '0' && sw[1] == '\0') {
+     return false;
+   }
+@@ -1714,7 +1714,7 @@ buildIndices(PatternRewriter &rewriter, Location loc,
+     }
+   }
+ 
+-  // (MOLA, 2026-09-06) The slice pitch is the footprint of the WHOLE
++  // (Tutticore, 2026-09-06) The slice pitch is the footprint of the WHOLE
+   // compute nest, not of this operand's own dst dims. An operand whose
+   // access map carries a constant index (a broadcast: `%cos[%i, 0, %k, %l]`
+   // against `%q[%i, %j, %k, %l]` with j over two tiles) owns fewer dst dims
+diff --git a/lib/Dialect/D2M/Transforms/LowerDMAToFullyIndexedForm.cpp b/lib/Dialect/D2M/Transforms/LowerDMAToFullyIndexedForm.cpp
+index e0b2015..677eecf 100644
+--- a/lib/Dialect/D2M/Transforms/LowerDMAToFullyIndexedForm.cpp
++++ b/lib/Dialect/D2M/Transforms/LowerDMAToFullyIndexedForm.cpp
+@@ -408,7 +408,7 @@ static Value generateDMAWithCoalescing(OpBuilder &builder, Location loc,
+   return loopNest.results.front();
+ }
+ 
+-// MOLA (#1726): a DMA read through a view that maps part of its iteration
++// Tutticore (#1726): a DMA read through a view that maps part of its iteration
+ // space OUTSIDE its source memref's shape. A padding relayout lowered through
+ // shared logical space (LowerToLayout's buildLayoutTransformMap) does this:
+ // the padded tiles of the view have no source tile, and the source's memory
+@@ -556,7 +556,7 @@ public:
+ 
+     SmallVector<Value> gridIndices(op.getSrcIndices());
+ 
+-    // (MOLA #1726: a view that reads outside its source)
++    // (Tutticore #1726: a view that reads outside its source)
+     AffineMap viewMap;
+     SmallVector<int64_t> sourceShape;
+     bool guardSource = false;
+diff --git a/lib/Dialect/D2M/Transforms/LowerToLayout/LowerToLayout.cpp b/lib/Dialect/D2M/Transforms/LowerToLayout/LowerToLayout.cpp
+index 61ddcb2..7dd8ddc 100644
+--- a/lib/Dialect/D2M/Transforms/LowerToLayout/LowerToLayout.cpp
++++ b/lib/Dialect/D2M/Transforms/LowerToLayout/LowerToLayout.cpp
+@@ -352,7 +352,7 @@ public:
+           RankedTensorType::get(toTy.getShape(), toTy.getElementType(), enc);
+       auto view = rewriter.create<ViewLayoutOp>(loc, resultTy, fromVal, map,
+                                                 /*reinterpretLayout=*/false);
+-      // MOLA (#1726): a view onto a LARGER device shape (the grid-padded
++      // Tutticore (#1726): a view onto a LARGER device shape (the grid-padded
+       // relayout, dim_alignments 32x32 -> 32x416: 14 tiles viewed as 26).
+       // The shared logical-space map is the identity past the source's
+       // extent, so the view indexes OUTSIDE its source there; those indices
+diff --git a/lib/Dialect/D2M/Transforms/LowerToLayout/Plan.cpp b/lib/Dialect/D2M/Transforms/LowerToLayout/Plan.cpp
+index fd32b34..8ef1290 100644
+--- a/lib/Dialect/D2M/Transforms/LowerToLayout/Plan.cpp
++++ b/lib/Dialect/D2M/Transforms/LowerToLayout/Plan.cpp
+@@ -244,7 +244,7 @@ modifyDeviceType(MLIRContext *ctx, RankedTensorType baseType,
+     }
+   }
+ 
+-  // MOLA local patch (2026-06-07, re-authors dropped patch 03): an L1
++  // Tutticore local patch (2026-06-07, re-authors dropped patch 03): an L1
+   // buffer must be memory_layout=Sharded — Interleaved is only legal for
+   // DRAM. Propagating the base (e.g. DRAM-Interleaved) layout verbatim onto
+   // an L1 staging buffer produced silently-wrong reads in consuming
+diff --git a/lib/Dialect/D2M/Transforms/ScalarizeConstTensors.cpp b/lib/Dialect/D2M/Transforms/ScalarizeConstTensors.cpp
+index 643d21a..82504b9 100644
+--- a/lib/Dialect/D2M/Transforms/ScalarizeConstTensors.cpp
++++ b/lib/Dialect/D2M/Transforms/ScalarizeConstTensors.cpp
+@@ -164,11 +164,11 @@ static bool isScalarRhsUse(Operation *user, Value arg) {
+   // Float arithmetic keeps its constant as a tile. The SFPU scalar-immediate
+   // path (binop_with_scalar: mul_unary_tile and friends) truncates its result
+   // into a 16-bit DST -- measured round-toward-zero on 100% of a random bf16
+-  // multiply-by-constant (MOLA experiments/tt/probes/qwen/bf16_mul_splat.py,
++  // multiply-by-constant (Tutticore experiments/tt/probes/qwen/bf16_mul_splat.py,
+   // 2026-09-05) -- while the two-tile SFPU op rounds to nearest even, which
+   // is also what TTNN does (its binary_ng keeps the scalar as a broadcast
+   // tile). Integer scalars are unaffected.
+-  const char *constTilesSwitch = std::getenv("MOLA_TT_D2M_CONST_TILES");
++  const char *constTilesSwitch = std::getenv("TUTTICORE_TT_D2M_CONST_TILES");
+   const bool constTiles = !(constTilesSwitch && constTilesSwitch[0] == '0');
+   if (constTiles && isa<TileAddOp, TileSubOp, TileMulOp, TileDivOp>(user)) {
+     if (auto tile = dyn_cast<ttcore::TileType>(arg.getType());
+diff --git a/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp b/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
+index b1e8ed8..f6a7609 100644
+--- a/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
++++ b/lib/Dialect/D2M/Utils/DstRegisterAnalysis.cpp
+@@ -43,7 +43,7 @@ static DstExecutionClass classifyComputeOp(Operation *op) {
+     // Float multiplies are SFPU ops (see TileMulOp::getOperandsLoadFromDstRegister
+     // for the measured FPU ELWMUL precision loss); keep this in sync with it.
+     if (mlir::isa<TileMulOp>(op)) {
+-      const char *sfpuMulSwitch = std::getenv("MOLA_TT_D2M_SFPU_MUL");
++      const char *sfpuMulSwitch = std::getenv("TUTTICORE_TT_D2M_SFPU_MUL");
+       const bool sfpuMul = !(sfpuMulSwitch && sfpuMulSwitch[0] == '0');
+       // Broadcast operands included; see TileMulOp::getOperandsLoadFromDstRegister.
+       const bool hasBcastOperand = false;
+diff --git a/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp b/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
+index f2b4aa9..3db1a86 100644
+--- a/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
++++ b/lib/Dialect/D2M/Utils/GridSelectionUtils.cpp
+@@ -245,7 +245,7 @@ bool shouldImplementAsVirtualGrid(mlir::RankedTensorType tensorType,
+   // VGM-compatible — the VGM maps only the materialized grid dimensions while
+   // the layout keeps the logical-to-physical collapse.
+   //
+-  // MOLA local patch (2026-06-03): leading UNIT dims (a degenerate batch=1,
++  // Tutticore local patch (2026-06-03): leading UNIT dims (a degenerate batch=1,
+   // e.g. a batched dot_general traced from torch) don't make a tensor
+   // meaningfully >2D — sharding only happens on the last two dims, and
+   // computeOptimalBlockShardedGrid already handles rank>2 by sharding the
+diff --git a/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp b/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
+index dac5ae4..5080d6a 100644
+--- a/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
++++ b/lib/Dialect/TTCore/IR/TTCoreOpsTypes.cpp
+@@ -959,7 +959,7 @@ llvm::SmallVector<int64_t>
+ MetalLayoutAttr::getDeviceShape(ArrayRef<int64_t> gridShape,
+                                 ArrayRef<int64_t> tileShape) const {
+   llvm::SmallVector<int64_t> physicalShape = getPhysicalShape(tileShape);
+-  // MOLA local patch (2026-05-05, patch 10): pad gridShape with 1s
++  // Tutticore local patch (2026-05-05, patch 10): pad gridShape with 1s
+   // to match physicalShape's rank. Higher-rank tensors (e.g. Llama's
+   // 4D-6D activations after tile expansion) iterate physicalShape
+   // beyond the device's mesh-grid rank (typically 2D); without
+diff --git a/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp b/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
+index b04e7e5..e51af5b 100644
+--- a/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
++++ b/lib/Dialect/TTCore/Utils/AffineMapUtils.cpp
+@@ -305,7 +305,7 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
+ 
+   // Build OUTPUT device → logical map.
+   // OUTPUT device → OUTPUT physical.
+-  // MOLA local patch (2026-06-07): pad a short grid (leading unit dims) and
++  // Tutticore local patch (2026-06-07): pad a short grid (leading unit dims) and
+   // prepend an expansion so the composed map's input dims match the
+   // tensor's TRUE device rank (see the input-side patch below).
+   size_t toPad = toPhysicalShape.size() > toGridShape.size()
+@@ -354,7 +354,7 @@ mlir::AffineMap buildLayoutTransformMap(MetalLayoutAttr fromLayout,
+ 
+   // INPUT physical → INPUT device.
+   //
+-  // MOLA local patch (2026-06-07): a tensor whose grid rank is lower than
++  // Tutticore local patch (2026-06-07): a tensor whose grid rank is lower than
+   // its physical rank (leading size-1 dims dropped from the grid, e.g.
+   // Llama's batched attention tensors materialized with a 2D grid against a
+   // 3D physical shape) used to assert in buildPhysicalToDeviceMap. Build
+diff --git a/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp b/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
+index 9215940..42fb870 100644
+--- a/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
++++ b/lib/Dialect/TTIR/Pipelines/TTIRPipelines.cpp
+@@ -63,7 +63,7 @@ void createStableHLOToTTIRPipeline(
+     pm.addPass(createConvertArithToStableHLOPass());
+   }
+   if (options.enableAggressiveSimplification) {
+-    // MOLA F3 (2026-05-12, re-ported 2026-08-24): this stablehlo pass is
++    // Tutticore F3 (2026-05-12, re-ported 2026-08-24): this stablehlo pass is
+     // anchored on `func.func`. Upstream adds it straight to a module-scoped pm,
+     // which aborts under parsePassPipeline (it forces Nesting::Explicit).
+     pm.nest<mlir::func::FuncOp>().addPass(
+diff --git a/lib/Dialect/TTIR/Transforms/DecomposeComplexReshape.cpp b/lib/Dialect/TTIR/Transforms/DecomposeComplexReshape.cpp
+index 2378044..5867329 100644
+--- a/lib/Dialect/TTIR/Transforms/DecomposeComplexReshape.cpp
++++ b/lib/Dialect/TTIR/Transforms/DecomposeComplexReshape.cpp
+@@ -163,7 +163,7 @@ bool needsFlattenAndSwap(llvm::ArrayRef<int64_t> inputShape,
+          countTrailingOnes(inputShape) > 0;
+ }
+ 
+-// MOLA local patch 42 (2026-10-09): the trailing-1 status flips AND the
++// Tutticore local patch 42 (2026-10-09): the trailing-1 status flips AND the
+ // non-1 dimensions are repartitioned in the same reshape, e.g.
+ //   [16, 128] -> [2048, 1]        [1, 2048] -> [1, 16, 128, 1]
+ //   [2048, 1] -> [16, 128]
+diff --git a/lib/Target/TTMetal/TTMetalToFlatbuffer.cpp b/lib/Target/TTMetal/TTMetalToFlatbuffer.cpp
+index b3ccf7b..7a4d565 100644
+--- a/lib/Target/TTMetal/TTMetalToFlatbuffer.cpp
++++ b/lib/Target/TTMetal/TTMetalToFlatbuffer.cpp
+@@ -1070,13 +1070,13 @@ memrefGlobalOpToFlatbufferByteVector(FlatbufferObjectCache &cache,
+   flatbuffers::Offset<::flatbuffers::Vector<uint8_t>> data;
+ 
+   // Real (non-splat) model weights enter as ttir.constant with a
+-  // DenseResourceElementsAttr (dense_resource<...>), which MOLA lowers to
++  // DenseResourceElementsAttr (dense_resource<...>), which Tutticore lowers to
+   // arith.constant -> memref.global. The resource holds the tensor's raw
+   // bytes already in element order/endianness, so emit them directly. The
+   // DenseElementsAttr path (splat / small inline constants) keeps the
+   // existing typed conversion. Mirrors the TTNN translator's ConstantOp
+   // handling (TTNNToFlatbuffer.cpp). Required for QKV / real-weight Llama
+-  // on the TTMetal chain. (MOLA local patch 2026-06-03, re-authored 06.)
++  // on the TTMetal chain. (Tutticore local patch 2026-06-03, re-authored 06.)
+   if (auto resourceAttr = mlir::dyn_cast<mlir::DenseResourceElementsAttr>(
+           globalOp.getInitialValueAttr())) {
+     ArrayRef<char> rawData = resourceAttr.getData();
+diff --git a/runtime/lib/ttmetal/runtime.cpp b/runtime/lib/ttmetal/runtime.cpp
+index 15d8471..d4d4fbd 100644
+--- a/runtime/lib/ttmetal/runtime.cpp
++++ b/runtime/lib/ttmetal/runtime.cpp
+@@ -1065,7 +1065,7 @@ std::vector<Tensor> submit(Device deviceHandle, Binary executableHandle,
+     // Cache one submesh per (parent, shape): create_submesh registers the
+     // child in the parent, so creating one per submit() accumulates a submesh
+     // per dispatch — after ~8 in-process re-dispatches the device hard-stalls
+-    // (MOLA G3 re-dispatch bug).
++    // (Tutticore G3 re-dispatch bug).
+     static std::map<std::tuple<int, int64_t, int64_t>,
+                     std::shared_ptr<tt_metal::distributed::MeshDevice>>
+         submeshCache;
+diff --git a/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir b/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
+index bf75f8f..22f2e8e 100644
+--- a/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
++++ b/test/ttmlir/Conversion/TTIRToD2M/reshape_unaligned_inner_l1_staging.mlir
+@@ -1,7 +1,7 @@
+ // RUN: ttmlir-opt --ttcore-register-device --ttir-to-d2m -o %t %s
+ // RUN: FileCheck %s --input-file=%t
+ //
+-// MOLA local patch 33: a reshape that re-partitions the innermost dimension
++// Tutticore local patch 33: a reshape that re-partitions the innermost dimension
+ // into or out of an extent that is not a multiple of the tile width is
+ // miscompiled when its operand lives in DRAM (the view's addresses are correct
+ // in every inspectable layer; resolving them against a DRAM-sharded buffer
+-- 
+2.53.0
+

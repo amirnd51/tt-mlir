@@ -815,3 +815,15 @@ Seen from MOLA (tt/audit-gridpad-pack, 2026-11-12): the six grid-padded
 staged shapes (32x448, 64x448, 32x512, 352x32, 352x64, 416x32) lower with
 the zero fill and pass MOLA's TT untiled preservation audit; 57 other TT
 modules lower byte-identically (the IR after convert-d2m-to-ttmetal).
+
+### 47 — rename MOLA to Tutticore in the names this fork and the compiler share (2026-11-16)
+
+`47-rename-mola-to-tutticore-2026-11-16.patch` — the attributes `tutticore.target`, `tutticore.memspace`,
+`tutticore.placement_done`, `tutticore.in_l1`, `tutticore.lhs_l1`,
+`tutticore.out_l1`, the pipeline options `tutticore-placement-pipeline` and
+`tutticore-pre-to-d2m-pipeline`, the `TUTTICORE_TT_*` switches, and comments.
+The compiler (formerly MOLA) renamed itself to Tutticore; both sides move
+in lockstep, so a tree with only one side renamed does not place anything.
+This directory is history and keeps its name and its earlier records.
+One commit, replayed onto record 46 from `9d539f37` (the same change on
+`b88ff0c`). Not built here: no TT toolchain on the machine that made it.
